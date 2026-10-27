@@ -1,5 +1,7 @@
 # claude-agent-ledger
 
+<img src="https://raw.githubusercontent.com/zemixo/claude-agent-ledger/main/quiet-orbit-banner.svg" alt="Agent Ledger: Follow the token trail. Zemixo pixel robot workshop." width="100%">
+
 > See exactly where your Claude Code budget goes — per subagent, per model, per day.
 
 [![npm](https://img.shields.io/npm/v/claude-agent-ledger.svg)](https://www.npmjs.com/package/claude-agent-ledger)
@@ -8,6 +10,8 @@
 > Use `--anonymize` before sharing output. It replaces project paths and
 > session IDs, but it does not rename subagent or tool names — review those
 > before you post a screenshot.
+
+[Install](#install) · [Example](#example) · [Flags](#flags) · [Source install](#install-from-source)
 
 ---
 
@@ -250,7 +254,7 @@ from `main`. The npm package follows tagged releases; use the source install
 below to try changes that have not been published yet.
 
 ```bash
-git clone https://github.com/XJM-free/claude-agent-ledger.git
+git clone https://github.com/zemixo/claude-agent-ledger.git
 cd claude-agent-ledger
 bun install
 bun link
@@ -267,8 +271,7 @@ bun run build
 
 ## Author
 
-Built by [Quiet Orbit](https://github.com/XJM-free)
-([Quiet Orbit](https://github.com/XJM-free)).
+Built by [Zemixo](https://github.com/zemixo).
 
 ## License
 
