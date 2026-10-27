@@ -29,15 +29,15 @@
     "observability",
     "cli"
   ],
-  "author": "Quiet Orbit",
+  "author": "Zemixo",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/XJM-free/claude-agent-ledger.git"
+    "url": "git+https://github.com/zemixo/claude-agent-ledger.git"
   },
-  "homepage": "https://github.com/XJM-free/claude-agent-ledger#readme",
+  "homepage": "https://github.com/zemixo/claude-agent-ledger#readme",
   "bugs": {
-    "url": "https://github.com/XJM-free/claude-agent-ledger/issues"
+    "url": "https://github.com/zemixo/claude-agent-ledger/issues"
   },
   "devDependencies": {
     "@types/bun": "latest",
