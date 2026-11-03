@@ -1,4 +1,4 @@
-import { costFor } from './pricing.ts';
+import { costForTimestamp } from './pricing.ts';
 import type { AggregatedRow, LedgerReport, SessionTurn, SubagentTreeNode } from './types.ts';
 
 const MAIN_AGENT_LABEL = '(main)';
@@ -9,7 +9,7 @@ const UNKNOWN_TOOL_LABEL = '(no-tool)';
 export type GroupKey = 'subagent' | 'model' | 'day' | 'project' | 'session' | 'tool';
 
 // Decode Claude Code's project directory name to something readable.
-//   "-Users-xiangjie-clawbot" → "~/clawbot"
+//   "-Users-example-project" → "~/project"
 export function decodeProjectId(encoded: string): string {
 	if (!encoded.startsWith('-')) return encoded;
 	const parts = encoded.slice(1).split('-');
@@ -61,13 +61,78 @@ function keysOf(turn: SessionTurn, group: GroupKey): string[] {
 	if (group === 'model') return [turn.model ?? UNKNOWN_MODEL_LABEL];
 	if (group === 'day') return [turn.timestamp.slice(0, 10)];
 	if (group === 'project') return [decodeProjectId(turn.projectId ?? UNKNOWN_PROJECT_LABEL)];
-	if (group === 'session') return [turn.sessionId.slice(0, 8)];
+	if (group === 'session') return [turn.sessionId];
 	if (group === 'tool') {
 		// Attribute the assistant turn's cost equally across every tool it invoked.
 		// If the turn invoked no tools, attribute to (no-tool).
 		return turn.toolUses && turn.toolUses.length > 0 ? turn.toolUses : [UNKNOWN_TOOL_LABEL];
 	}
 	return [turn.subagentType ?? MAIN_AGENT_LABEL];
+}
+
+export class DuplicateSessionIdError extends Error {
+	constructor() {
+		super('duplicate full session ids prevent unambiguous session labels');
+		this.name = 'DuplicateSessionIdError';
+	}
+}
+
+export class UnsupportedSessionIdError extends Error {
+	constructor() {
+		super('a reported session cannot be labeled safely for explain');
+		this.name = 'UnsupportedSessionIdError';
+	}
+}
+
+function sessionLabels(
+	rowSessionIds: Iterable<string>,
+	allSessionIds?: Iterable<string>,
+): Map<string, string> {
+	const rowIds = [...new Set(rowSessionIds)];
+	const discoveredIds = allSessionIds ? [...allSessionIds] : rowIds;
+	const discoveredCounts = new Map<string, number>();
+	for (const id of discoveredIds) {
+		discoveredCounts.set(id, (discoveredCounts.get(id) ?? 0) + 1);
+	}
+	if (rowIds.some((id) => (discoveredCounts.get(id) ?? 0) > 1)) {
+		throw new DuplicateSessionIdError();
+	}
+	const universe = new Set(discoveredIds);
+	for (const id of rowIds) universe.add(id);
+	const candidates = [...universe].sort();
+	const candidateIndexes = new Map(candidates.map((id, index) => [id, index]));
+	const labels = new Map<string, string>();
+
+	const sharedPrefixLength = (left: string | undefined, right: string): number => {
+		if (left === undefined) return 0;
+		let length = 0;
+		while (length < left.length && length < right.length && left[length] === right[length]) {
+			length++;
+		}
+		return length;
+	};
+
+	for (const id of rowIds) {
+		const index = candidateIndexes.get(id)!;
+		const sharedWithNeighbor = Math.max(
+			sharedPrefixLength(candidates[index - 1], id),
+			sharedPrefixLength(candidates[index + 1], id),
+		);
+		const labelLength = Math.min(id.length, Math.max(8, sharedWithNeighbor + 1));
+		const label = id.slice(0, labelLength);
+		if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(label)) {
+			throw new UnsupportedSessionIdError();
+		}
+		labels.set(id, label);
+	}
+
+	return labels;
+}
+
+export interface FinalizeOptions {
+	// All locally discovered session ids, including logs outside the report's
+	// date range. This keeps displayed prefixes directly usable by `explain`.
+	sessionIds?: Iterable<string>;
 }
 
 function sortKey(group: GroupKey): (a: AggregatedRow, b: AggregatedRow) => number {
@@ -89,6 +154,7 @@ function compareTreeNodes(a: SubagentTreeNode, b: SubagentTreeNode): number {
 export class Aggregator {
 	private rowsByKey = new Map<string, AggregatedRow>();
 	private sessionsByKey = new Map<string, Set<string>>();
+	private readonly pricingFallback = new Date();
 
 	constructor(
 		private readonly group: GroupKey,
@@ -99,7 +165,12 @@ export class Aggregator {
 	add(turn: SessionTurn): void {
 		if (turn.type !== 'assistant' || !turn.usage) return;
 
-		const cost = costFor(turn.usage, turn.model);
+		const cost = costForTimestamp(
+			turn.usage,
+			turn.model,
+			turn.timestamp,
+			this.pricingFallback,
+		);
 		const { fiveMin, oneHour } = splitCache(turn);
 		const usage = turn.usage;
 		const keys = keysOf(turn, this.group);
@@ -136,11 +207,19 @@ export class Aggregator {
 		}
 	}
 
-	finalize(): LedgerReport {
+	finalize(options: FinalizeOptions = {}): LedgerReport {
 		for (const [key, row] of this.rowsByKey) {
 			row.sessionCount = this.sessionsByKey.get(key)?.size ?? 0;
 		}
-		const rows = [...this.rowsByKey.values()].sort(sortKey(this.group));
+		const labels =
+			this.group === 'session'
+				? sessionLabels(this.rowsByKey.keys(), options.sessionIds)
+				: undefined;
+		const rows = [...this.rowsByKey]
+			.map(([key, row]) =>
+				labels ? { ...row, subagent: labels.get(key) ?? key } : row,
+			)
+			.sort(sortKey(this.group));
 		const total = rows.reduce<AggregatedRow>((acc, row) => {
 			acc.sessionCount += row.sessionCount;
 			acc.inputTokens += row.inputTokens;
@@ -177,8 +256,9 @@ export async function aggregate(
 
 // MOAT feature: subagent-graph cost attribution.
 // Walks every parent session and recursively sums children to produce a tree
-// rooted at the orchestrator. Helicone/Langfuse cannot do this — they observe
-// API calls, not Claude Code's orchestration tree.
+// rooted at the observed orchestrator, or at the first in-period child when
+// the parent is outside the selected range. Helicone/Langfuse cannot do this —
+// they observe API calls, not Claude Code's orchestration tree.
 interface SessionAccum {
 	sessionId: string;
 	label: string;
@@ -189,10 +269,16 @@ interface SessionAccum {
 
 export class SubagentGraph {
 	private accums = new Map<string, SessionAccum>();
+	private readonly pricingFallback = new Date();
 
 	add(turn: SessionTurn): void {
 		if (turn.type !== 'assistant' || !turn.usage) return;
-		const cost = costFor(turn.usage, turn.model).totalCost;
+		const cost = costForTimestamp(
+			turn.usage,
+			turn.model,
+			turn.timestamp,
+			this.pricingFallback,
+		).totalCost;
 		let acc = this.accums.get(turn.sessionId);
 		if (!acc) {
 			acc = {
@@ -213,7 +299,8 @@ export class SubagentGraph {
 		}
 	}
 
-	// Build the trees. Each root has parentSessionId === undefined.
+	// Build the trees. A session is also a display root when its parent falls
+	// outside the selected period and therefore is not present in this graph.
 	// Returns roots sorted by total cost (descending), top N only by default.
 	finalize(topN = 20): SubagentTreeNode[] {
 		const childrenOf = new Map<string, string[]>();
@@ -243,7 +330,7 @@ export class SubagentGraph {
 			};
 		};
 		const roots = [...this.accums.values()]
-			.filter((a) => !a.parentSessionId)
+			.filter((a) => !a.parentSessionId || !this.accums.has(a.parentSessionId))
 			.map((a) => buildNode(a.sessionId))
 			.sort(compareTreeNodes)
 			.slice(0, topN);

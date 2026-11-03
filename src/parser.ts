@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { access, lstat, readdir, stat } from 'node:fs/promises';
+import { access, lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { parseRfc3339Timestamp } from './timestamp.ts';
@@ -14,15 +14,28 @@ export interface ParseOptions {
 	from?: Date;
 	to?: Date;
 	projectsDir?: string;
-	/** Fail instead of silently skipping unreadable paths; reject nested symlinks. */
+	onSessionLog?: (sessionId: string) => void;
+	onSkippedRecord?: (reason: string) => void;
+	/** Fail on unreadable paths and reject nested symlinks. */
 	strictSource?: boolean;
-	/** Deliver invalid or missing timestamps so a caller can report the coverage gap. */
+	/** Deliver invalid timestamps only to callers that explicitly diagnose them. */
 	includeInvalidTimestamps?: boolean;
+	/** Forecast requires explicit RFC3339 instants; legacy aggregate parsing remains unchanged. */
+	strictTimestamps?: boolean;
+	/** Preserve invalid or incomplete usage for a validating caller, never aggregation. */
+	includeInvalidUsage?: boolean;
 	diagnostics?: ParseDiagnostics;
 }
 
 export interface ParseDiagnostics {
 	malformedJsonLines: number;
+}
+
+export class LogSourceError extends Error {
+	constructor(readonly reason: 'unreadable-directory' | 'uninspectable-path' | 'symbolic-link', options?: ErrorOptions) {
+		super(reason, options);
+		this.name = 'LogSourceError';
+	}
 }
 
 export interface LogFile {
@@ -46,9 +59,9 @@ export async function* findSessionLogs(
 		const projectPath = join(projectsDir, project);
 		if (strictSource) {
 			const info = await inspectPath(projectPath, true);
-			if (!info) throw new Error(`cannot inspect forecast source path: ${projectPath}`);
+			if (!info) throw new LogSourceError('uninspectable-path');
 			if (info.isSymbolicLink()) {
-				throw new Error(`symbolic link is not allowed in forecast source: ${projectPath}`);
+				throw new LogSourceError('symbolic-link');
 			}
 			if (!info.isDirectory()) return [];
 		}
@@ -66,7 +79,7 @@ async function collectWalk(
 	strictSource: boolean,
 ): Promise<LogFile[]> {
 	const out: LogFile[] = [];
-	for await (const lf of walkForJsonl(dir, projectId, strictSource)) out.push(lf);
+	for await (const lf of walkForJsonl(dir, projectId, strictSource, new Set())) out.push(lf);
 	return out;
 }
 
@@ -76,7 +89,7 @@ async function readDirectory(dir: string, strictSource: boolean): Promise<string
 		return await readdir(dir);
 	} catch (error) {
 		if (strictSource) {
-			throw new Error(`cannot read forecast source directory: ${dir}`, { cause: error });
+			throw new LogSourceError('unreadable-directory', { cause: error });
 		}
 		return [];
 	}
@@ -87,7 +100,7 @@ async function inspectPath(path: string, strictSource: boolean) {
 		return strictSource ? await lstat(path) : await stat(path);
 	} catch (error) {
 		if (strictSource) {
-			throw new Error(`cannot inspect forecast source path: ${path}`, { cause: error });
+			throw new LogSourceError('uninspectable-path', { cause: error });
 		}
 		return undefined;
 	}
@@ -97,7 +110,16 @@ async function* walkForJsonl(
 	dir: string,
 	projectId: string,
 	strictSource: boolean,
+	visited: Set<string>,
 ): AsyncGenerator<LogFile> {
+	try {
+		const canonical = await realpath(dir);
+		if (visited.has(canonical)) return;
+		visited.add(canonical);
+	} catch (error) {
+		if (strictSource) throw error;
+		return;
+	}
 	const entries = await readDirectory(dir, strictSource);
 	// If this directory IS named 'subagents', its parent session is one level up.
 	// e.g. .../<session-uuid>/subagents/agent-XXX.jsonl → parent = <session-uuid>
@@ -108,10 +130,10 @@ async function* walkForJsonl(
 		const info = await inspectPath(full, strictSource);
 		if (!info) continue;
 		if (strictSource && info.isSymbolicLink()) {
-			throw new Error(`symbolic link is not allowed in forecast source: ${full}`);
+			throw new LogSourceError('symbolic-link');
 		}
 		if (info.isDirectory()) {
-			yield* walkForJsonl(full, projectId, strictSource);
+			yield* walkForJsonl(full, projectId, strictSource, visited);
 			continue;
 		}
 		if (name.endsWith('.jsonl')) {
@@ -140,14 +162,14 @@ async function resolveSubagentType(jsonlPath: string): Promise<string | undefine
 }
 
 // Streaming line reader — does NOT buffer the whole file.
-// Handles partial lines across chunk boundaries. Malformed JSON is skipped and
-// counted when the caller supplies diagnostics.
+// Handles partial lines across chunk boundaries. Skips malformed JSON.
 export async function* parseFile(
 	path: string,
 	subagentType?: string,
 	projectId?: string,
 	parentSessionId?: string,
-	diagnostics?: ParseDiagnostics,
+	onSkippedRecord?: (reason: string) => void,
+	opts: ParseOptions = {},
 ): AsyncGenerator<SessionTurn> {
 	const sessionId = basename(path).replace('.jsonl', '');
 	const stream = Bun.file(path).stream();
@@ -160,28 +182,14 @@ export async function* parseFile(
 			const line = buffer.slice(0, nl);
 			buffer = buffer.slice(nl + 1);
 			if (!line.trim()) continue;
-			const turn = tryParseLine(
-				line,
-				sessionId,
-				subagentType,
-				projectId,
-				parentSessionId,
-				diagnostics,
-			);
+			const turn = tryParseLine(line, sessionId, subagentType, projectId, parentSessionId, onSkippedRecord, opts);
 			if (turn) yield turn;
 		}
 	}
 	// Flush any trailing partial line.
 	buffer += decoder.decode();
 	if (buffer.trim()) {
-		const turn = tryParseLine(
-			buffer,
-			sessionId,
-			subagentType,
-			projectId,
-			parentSessionId,
-			diagnostics,
-		);
+		const turn = tryParseLine(buffer, sessionId, subagentType, projectId, parentSessionId, onSkippedRecord, opts);
 		if (turn) yield turn;
 	}
 }
@@ -192,21 +200,71 @@ function tryParseLine(
 	subagentType: string | undefined,
 	projectId: string | undefined,
 	parentSessionId: string | undefined,
-	diagnostics: ParseDiagnostics | undefined,
+	onSkippedRecord?: (reason: string) => void,
+	opts: ParseOptions = {},
 ): SessionTurn | undefined {
-	let parsed: unknown;
+	let obj: unknown;
 	try {
-		parsed = JSON.parse(line);
+		obj = JSON.parse(line);
 	} catch {
-		if (diagnostics) diagnostics.malformedJsonLines++;
+		onSkippedRecord?.('invalid_json');
+		if (opts.diagnostics) opts.diagnostics.malformedJsonLines++;
 		return undefined;
 	}
-	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-		if (diagnostics) diagnostics.malformedJsonLines++;
+	if (!isRecord(obj)) {
+		onSkippedRecord?.('invalid_record');
+		if (opts.diagnostics) opts.diagnostics.malformedJsonLines++;
 		return undefined;
 	}
-	const obj = parsed as Record<string, unknown>;
-	return extractTurn(obj, sessionId, subagentType, projectId, parentSessionId);
+	const msg = isRecord(obj.message) ? obj.message : {};
+	const type = obj.type ?? msg.role;
+	if (typeof type !== 'string' || !['assistant', 'user', 'summary', 'system'].includes(type)) return undefined;
+	const timestampValid = opts.strictTimestamps
+		? Boolean(parseRfc3339Timestamp(obj.timestamp))
+		: typeof obj.timestamp === 'string' && Number.isFinite(Date.parse(obj.timestamp));
+	if (!timestampValid) {
+		if (!opts.includeInvalidTimestamps) {
+			onSkippedRecord?.('invalid_timestamp');
+			return undefined;
+		}
+	}
+	if (msg.model !== undefined && typeof msg.model !== 'string') {
+		if (!opts.includeInvalidUsage) {
+			onSkippedRecord?.('invalid_model');
+			return undefined;
+		}
+	}
+	if (msg.usage !== undefined && !validUsage(msg.usage)) {
+		if (!opts.includeInvalidUsage) {
+			onSkippedRecord?.('invalid_usage');
+			return undefined;
+		}
+	}
+	return extractTurn(obj, sessionId, subagentType, projectId, parentSessionId, opts.includeInvalidUsage);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validCounters(value: Record<string, unknown>, keys: string[]): boolean {
+	return keys.every((key) => value[key] === undefined || (
+		typeof value[key] === 'number' && Number.isSafeInteger(value[key]) && (value[key] as number) >= 0
+	));
+}
+
+function validUsage(value: unknown): value is TokenUsage {
+	if (!isRecord(value) || !validCounters(value, [
+		'input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens',
+	])) return false;
+	for (const [field, keys] of [
+		['cache_creation', ['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens']],
+		['server_tool_use', ['web_search_requests', 'web_fetch_requests']],
+	] as const) {
+		const detail = value[field];
+		if (detail !== undefined && (!isRecord(detail) || !validCounters(detail, [...keys]))) return false;
+	}
+	return true;
 }
 
 function extractTurn(
@@ -215,13 +273,19 @@ function extractTurn(
 	subagentType: string | undefined,
 	projectId: string | undefined,
 	parentSessionId: string | undefined,
+	preserveUsage = false,
 ): SessionTurn {
-	const msg = (obj.message ?? {}) as Record<string, unknown>;
-	const usage = (msg.usage ?? undefined) as TokenUsage | undefined;
-	const model = (msg.model ?? undefined) as string | undefined;
-	const perTurnSubagent = ((obj.subagentType as string) ?? undefined) || undefined;
-	const perTurnProject = ((obj.projectId as string) ?? undefined) || undefined;
-	const perTurnParent = ((obj.parentSessionId as string) ?? undefined) || undefined;
+	const msg = isRecord(obj.message) ? obj.message : {};
+	const rawUsage = msg.usage as TokenUsage | undefined;
+	const usage = preserveUsage ? rawUsage : rawUsage ? {
+		...rawUsage,
+		input_tokens: rawUsage.input_tokens ?? 0,
+		output_tokens: rawUsage.output_tokens ?? 0,
+	} : undefined;
+	const model = typeof msg.model === 'string' ? msg.model : undefined;
+	const perTurnSubagent = typeof obj.subagentType === 'string' ? obj.subagentType || undefined : undefined;
+	const perTurnProject = typeof obj.projectId === 'string' ? obj.projectId || undefined : undefined;
+	const perTurnParent = typeof obj.parentSessionId === 'string' ? obj.parentSessionId || undefined : undefined;
 
 	// Extract tool_use blocks from the assistant message content (if any).
 	// Used by the --by tool aggregator and subagent-graph attribution.
@@ -239,7 +303,7 @@ function extractTurn(
 	}
 
 	return {
-		type: ((obj.type as string) ?? 'assistant') as SessionTurn['type'],
+		type: (obj.type ?? msg.role) as SessionTurn['type'],
 		timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : '',
 		sessionId,
 		projectId: perTurnProject ?? projectId,
@@ -339,8 +403,10 @@ async function* filterByRange(
 	opts: ParseOptions,
 ): AsyncGenerator<SessionTurn> {
 	for await (const turn of turns) {
-		const timestamp = parseRfc3339Timestamp(turn.timestamp);
-		if (!timestamp) {
+		const timestamp = opts.strictTimestamps
+			? parseRfc3339Timestamp(turn.timestamp)
+			: new Date(turn.timestamp);
+		if (!timestamp || !Number.isFinite(timestamp.getTime())) {
 			if (opts.includeInvalidTimestamps) yield turn;
 			continue;
 		}
@@ -363,13 +429,7 @@ export async function* streamLogFiles(
 		const batch = files.slice(i, i + CONCURRENCY);
 		const streams = batch.map((file) =>
 			filterByRange(
-				readLog(
-					file.path,
-					file.subagentType,
-					file.projectId,
-					file.parentSessionId,
-					opts.diagnostics,
-				),
+				readLog(file.path, file.subagentType, file.projectId, file.parentSessionId, opts.onSkippedRecord, opts),
 				opts,
 			),
 		);
@@ -382,6 +442,9 @@ export async function* streamLogFiles(
 export async function* parseAll(opts: ParseOptions = {}): AsyncGenerator<SessionTurn> {
 	const dir = opts.projectsDir ?? CLAUDE_PROJECTS_DIR;
 	const files: LogFile[] = [];
-	for await (const file of findSessionLogs(dir, opts.strictSource)) files.push(file);
+	for await (const file of findSessionLogs(dir, opts.strictSource)) {
+		files.push(file);
+		opts.onSessionLog?.(basename(file.path, '.jsonl'));
+	}
 	yield* streamLogFiles(files, opts);
 }
