@@ -127,7 +127,7 @@ describe('Claude log contract v1', () => {
 		for (const file of ['assistant-current.jsonl', 'assistant-legacy.jsonl']) {
 			const diagnostics = createParseDiagnostics();
 			const turns = [];
-			for await (const turn of parseFile(join(CONTRACT_ROOT, file), undefined, undefined, undefined, diagnostics)) {
+			for await (const turn of parseFile(join(CONTRACT_ROOT, file), undefined, undefined, undefined, undefined, { diagnostics })) {
 				turns.push(turn);
 			}
 			expect(turns).toHaveLength(1);
@@ -150,7 +150,7 @@ describe('Claude log contract v1', () => {
 		const diagnostics = createParseDiagnostics();
 		const turns = [];
 		for (const file of ['context-known.jsonl', 'metadata-known.jsonl']) {
-			for await (const turn of parseFile(join(CONTRACT_ROOT, file), undefined, undefined, undefined, diagnostics)) {
+			for await (const turn of parseFile(join(CONTRACT_ROOT, file), undefined, undefined, undefined, undefined, { diagnostics })) {
 				turns.push(turn);
 			}
 		}
@@ -216,7 +216,7 @@ describe('Claude log contract v1', () => {
 			undefined,
 			undefined,
 			undefined,
-			diagnostics,
+			undefined, { diagnostics, strictTimestamps: true },
 		)) {
 			turns.push(turn);
 		}

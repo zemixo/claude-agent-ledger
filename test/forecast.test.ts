@@ -407,7 +407,7 @@ describe('ForecastAccumulator', () => {
 		expect(report.amountsAreLowerBounds).toBe(true);
 	});
 
-	test('accepts coexisting flat and TTL-split cache counters', () => {
+	test('rejects conflicting flat and TTL-split cache counters', () => {
 		const forecast = new ForecastAccumulator(new Date('2026-08-03T12:00:00.000Z'));
 		const timestamp = new Date(forecast.window.historyFrom.getTime() + 12 * 3_600_000).toISOString();
 		expect(
@@ -424,11 +424,11 @@ describe('ForecastAccumulator', () => {
 					},
 				}),
 			),
-		).toBe(true);
+		).toBe(false);
 		const report = forecast.finalize();
-		expect(report.basis.shadowCostUsd).toBe(4.875);
-		expect(report.records.status).toBe('no-issues-detected');
-		expect(report.amountsAreLowerBounds).toBe(false);
+		expect(report.basis.shadowCostUsd).toBe(0);
+		expect(report.records.invalidUsageTurns).toBe(1);
+		expect(report.amountsAreLowerBounds).toBe(true);
 	});
 
 	test('treats synthetic turns as known free activity', () => {

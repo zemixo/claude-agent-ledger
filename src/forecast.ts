@@ -160,7 +160,7 @@ export class ForecastAccumulator {
 		// before validation so a coverage gap is never presented as inactivity.
 		row.assistantTurns++;
 		this.assistantTurns++;
-		if (!turn.usage || !isSupportedUsage(turn.usage)) {
+		if (!turn.usage || !isSupportedUsage(turn.usage, true)) {
 			this.invalidUsageTurns++;
 			return false;
 		}
@@ -205,12 +205,12 @@ export class ForecastAccumulator {
 			? sourceDiagnostics.unsupportedRecordLines
 			: 0;
 		const invalidTimestampTurns =
-			this.invalidTimestampTurns +
+			this.invalidTimestampTurns - (sourceDiagnostics.forwardedInvalidTimestampLines ?? 0) +
 			(nonNegativeSafeInteger(sourceDiagnostics.invalidTimestampLines)
 				? sourceDiagnostics.invalidTimestampLines
 				: 0);
 		const invalidUsageTurns =
-			this.invalidUsageTurns +
+			this.invalidUsageTurns - (sourceDiagnostics.forwardedInvalidUsageLines ?? 0) +
 			(nonNegativeSafeInteger(sourceDiagnostics.invalidUsageLines)
 				? sourceDiagnostics.invalidUsageLines
 				: 0);
@@ -301,11 +301,18 @@ function planDescription(plan: ForecastPlan): string {
 	return `${plan} · shadow-cost equivalent only; no subscription bill forecast`;
 }
 
+/** Render log-supplied labels without terminal controls; JSON retains the original value. */
+export function escapeForecastLabel(value: string): string {
+	return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (character) =>
+		`\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+	);
+}
+
 function pricingDescription(report: ForecastReport): string {
 	if (report.pricing.status === 'complete') {
 		return `complete · rates as of ${report.pricing.asOf.slice(0, 10)}`;
 	}
-	const gaps = [...report.pricing.unpricedModels];
+	const gaps = report.pricing.unpricedModels.map(escapeForecastLabel);
 	if (report.pricing.missingModelTurns > 0) {
 		gaps.push(`${report.pricing.missingModelTurns} missing-model turn(s)`);
 	}

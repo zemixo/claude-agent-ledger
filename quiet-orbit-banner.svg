@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="350" viewBox="0 0 1100 350" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Ledger — Zemixo workshop</title>
+  <desc id="desc">Follow the token trail. A cream pixel robot with amber eyes and a project emblem on midnight blue.</desc>
+  <rect width="1100" height="350" fill="#091730"/>
+  <g fill="none" stroke="#243551" stroke-width="1"><path d="M24 64V24H64M1036 24h40v40M24 286v40h40M1036 326h40v-40"/><path d="M710 52v246" stroke-dasharray="3 9"/></g>
+  <g fill="#ffbf58"><rect x="58" y="51" width="9" height="9"/><rect x="73" y="51" width="9" height="9" opacity=".5"/><rect x="88" y="51" width="9" height="9" opacity=".22"/></g>
+  <text x="115" y="61" fill="#c6cdd8" font-family="monospace" font-size="16" letter-spacing="2">ZEMIXO / TOOL 02</text>
+  <g fill="#f4ecd6" font-family="monospace" font-size="67" font-weight="700" letter-spacing="-2"><text x="56" y="144">Agent</text><text x="56" y="219">Ledger</text></g>
+  <text x="58" y="265" fill="#c6cdd8" font-family="monospace" font-size="22">Follow the token trail.</text>
+  <path d="M58 303h30" stroke="#ffbf58" stroke-width="3"/>
+  <text x="101" y="308" fill="#a3b1c6" font-family="monospace" font-size="14" letter-spacing="1">LOCAL LOGS / COST ESTIMATES</text>
+  <g transform="translate(766 32) scale(4.5)" shape-rendering="crispEdges">
+    <g fill="#53677f">
+      <path d="M35 9V6h3V3h3v8h-3v3h-3z"/>
+      <path d="M6 16h40v3h3v21h-3v3H6v-3H3V19h3z"/>
+      <rect x="19" y="42" width="15" height="4"/>
+      <path d="M14 46h24v13H14zM6 49h5v8H6zM41 49h5v8h-5z"/>
+      <path d="M16 59h7v4h-9v-2h2zM30 59h7v2h2v2h-9z"/>
+    </g>
+    <rect x="38" y="1" width="5" height="5" fill="#ffbf58"/>
+    <path d="M6 14h39v3h3v20h-3v4H6v-3H2V18h4z" fill="#ded4ba"/>
+    <path d="M6 14h37v3h3v19h-3v3H6v-3H2V18h4z" fill="#f4ecd6"/>
+    <path d="M9 20h31v3h3v12h-3v2H9v-2H6V23h3z" fill="#75869a"/>
+    <path d="M10 22h30v3h3v9h-3v2H10v-2H7v-9h3z" fill="#091730"/>
+    <rect x="16" y="26" width="4" height="4" fill="#ffbf58"/>
+    <rect x="31" y="28" width="4" height="4" fill="#ffbf58"/>
+    <path d="M15 44h21v3h3v9h-3v3H15v-3h-3V47h3z" fill="#ded4ba"/>
+    <path d="M15 44h19v3h2v8h-2v2H15v-2h-3V47h3z" fill="#f4ecd6"/>
+    <path d="M7 47h3v9H5v-6h2zM42 47h3v3h2v6h-5z" fill="#f4ecd6"/>
+    <path d="M15 60h8v2H13v-1h2zM30 60h8v1h2v1H30z" fill="#f4ecd6"/>
+  <g fill="#53677f"><rect x="19" y="52" width="3" height="4"/><rect x="24" y="49" width="3" height="7"/><rect x="29" y="46" width="3" height="10"/></g></g>
+</svg>
