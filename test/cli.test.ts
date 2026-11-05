@@ -149,6 +149,108 @@ describe('CLI metadata flags', () => {
 	});
 });
 
+describe('aggregate CLI log diagnostics', () => {
+	test('keeps JSON stdout valid and anonymizes diagnostic source names', () => {
+		const home = mkdtempSync(join(tmpdir(), 'agent-ledger-contract-home-'));
+		try {
+			const project = join(home, '.claude', 'projects', 'synthetic-project');
+			mkdirSync(project, { recursive: true });
+			writeFileSync(
+				join(project, 'private-session-name.jsonl'),
+				[
+					JSON.stringify({
+						type: 'assistant',
+						timestamp: new Date().toISOString(),
+						message: {
+							model: '<synthetic>',
+							usage: { input_tokens: 1, output_tokens: 1 },
+						},
+					}),
+					JSON.stringify({ type: 'mode' }),
+					JSON.stringify({
+						type: 'future-event',
+						private_marker: 'DO_NOT_ECHO_SYNTHETIC_MARKER',
+					}),
+				].join('\n') + '\n',
+			);
+			const result = runCli(['today', '--json', '--anonymize'], { HOME: home, TZ: 'UTC' });
+			expect(result.exitCode).toBe(0);
+			expect(JSON.parse(result.stdout).total.inputTokens).toBe(1);
+			expect(result.stderr).toContain('log contract v1 excluded 1 unsupported record line(s)');
+			expect(result.stderr).toContain('unsupported-record-type at session-log:3');
+			expect(result.stderr).toContain('claude-code.assistant-usage/v1');
+			expect(result.stderr).not.toContain('private-session-name');
+			expect(result.stderr).not.toContain('DO_NOT_ECHO_SYNTHETIC_MARKER');
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	test('watch reports a new incompatible shape once instead of silently undercounting', async () => {
+		const home = mkdtempSync(join(tmpdir(), 'agent-ledger-watch-contract-home-'));
+		try {
+			const project = join(home, '.claude', 'projects', 'synthetic-project');
+			mkdirSync(project, { recursive: true });
+			writeFileSync(
+				join(project, 'synthetic-watch-session.jsonl'),
+				JSON.stringify({
+					type: 'future-event',
+					timestamp: new Date().toISOString(),
+					private_marker: 'DO_NOT_ECHO_SYNTHETIC_MARKER',
+				}) + '\n',
+			);
+			const child = Bun.spawn({
+				cmd: [process.execPath, cliPath, 'watch', '2'],
+				stdout: 'pipe',
+				stderr: 'pipe',
+				env: { ...process.env, HOME: home, TZ: 'UTC', NO_COLOR: '1' },
+			});
+			const stdout = new Response(child.stdout).text();
+			const stderr = new Response(child.stderr).text();
+			const timer = setTimeout(() => child.kill(), 300);
+			await child.exited;
+			clearTimeout(timer);
+			const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
+			expect(stdoutText).toContain('agent-ledger watch');
+			expect(stderrText.match(/log contract v1 excluded/g)).toHaveLength(1);
+			expect(stderrText).toContain('unsupported-record-type');
+			expect(stderrText).not.toContain('DO_NOT_ECHO_SYNTHETIC_MARKER');
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('explain CLI log diagnostics', () => {
+	test('fails closed when an existing session contains only invalid usage', () => {
+		const home = mkdtempSync(join(tmpdir(), 'agent-ledger-explain-contract-home-'));
+		try {
+			const project = join(home, '.claude', 'projects', 'synthetic-project');
+			mkdirSync(project, { recursive: true });
+			writeFileSync(
+				join(project, 'synthetic-explain-session.jsonl'),
+				JSON.stringify({
+					type: 'assistant',
+					timestamp: '2026-08-03T01:00:00Z',
+					private_marker: 'DO_NOT_ECHO_SYNTHETIC_MARKER',
+					message: {
+						model: 'claude-sonnet-4-6',
+						usage: { input_tokens: -1 },
+					},
+				}) + '\n',
+			);
+			const result = runCli(['explain', 'synthetic-explain'], { HOME: home, TZ: 'UTC' });
+			expect(result.exitCode).toBe(1);
+			expect(result.stdout).toBe('');
+			expect(result.stderr).toContain('invalid-assistant-usage');
+			expect(result.stderr).toContain('no supported billable turns remain');
+			expect(result.stderr).not.toContain('DO_NOT_ECHO_SYNTHETIC_MARKER');
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+});
+
 describe('explain privacy flags', () => {
 	test('default output keeps the supplied session identifier', () => {
 		withExplainFixture((home) => {
@@ -337,6 +439,7 @@ describe('explain privacy flags', () => {
 			rmSync(home, { recursive: true, force: true });
 		}
 	});
+
 
 	test('--by session rejects duplicated full ids without leaking either path', () => {
 		const home = mkdtempSync(join(tmpdir(), 'agent-ledger-duplicate-session-'));
@@ -669,8 +772,8 @@ describe('forecast CLI', () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.stderr).toBe('');
 			const report = JSON.parse(result.stdout);
-				expect(report).toMatchObject({
-				schemaVersion: 1,
+			expect(report).toMatchObject({
+				schemaVersion: 2,
 				command: 'forecast',
 				metric: 'shadow_cost_usd',
 				timeZone: 'UTC',
@@ -724,7 +827,7 @@ describe('forecast CLI', () => {
 			expect(report.pricing.unpricedModels).toEqual(['claude-future-a', 'claude-future-z']);
 			expect(report.pricing.unpricedAssistantTurns).toBe(3);
 			expect(report.amountsAreLowerBounds).toBe(true);
-			expect(result.stderr.match(/incomplete cost coverage/g)).toHaveLength(1);
+			expect(result.stderr.match(/incomplete pricing coverage/g)).toHaveLength(1);
 		} finally {
 			rmSync(home, { recursive: true, force: true });
 		}
@@ -805,6 +908,14 @@ describe('forecast CLI', () => {
 				join(project, 'damaged.jsonl'),
 				[
 					JSON.stringify({
+						type: 'user',
+						timestamp,
+						message: {
+							role: 'user',
+							usage: { private_marker: 'DO_NOT_ECHO_SYNTHETIC_MARKER' },
+						},
+					}),
+					JSON.stringify({
 						type: 'assistant',
 						message: {
 							model: 'claude-sonnet-4-6',
@@ -846,8 +957,11 @@ describe('forecast CLI', () => {
 			expect(report.records).toEqual({
 				status: 'issues-detected',
 				malformedJsonLines: 1,
+				unsupportedRecordLines: 1,
 				invalidTimestampTurns: 3,
 				invalidUsageTurns: 1,
+				invalidSubagentMetaFiles: 0,
+				ignoredKnownSourceRecords: 0,
 			});
 			expect(report.basis).toMatchObject({
 				dataStatus: 'ok',
@@ -855,7 +969,9 @@ describe('forecast CLI', () => {
 				daysWithActivity: 1,
 				shadowCostUsd: 0,
 			});
-			expect(result.stderr.match(/incomplete cost coverage/g)).toHaveLength(1);
+			expect(result.stderr.match(/log contract v1 excluded/g)).toHaveLength(1);
+			expect(result.stderr).toContain('unexpected-usage-on-nonbillable-record');
+			expect(result.stderr).not.toContain('DO_NOT_ECHO_SYNTHETIC_MARKER');
 		} finally {
 			rmSync(home, { recursive: true, force: true });
 		}

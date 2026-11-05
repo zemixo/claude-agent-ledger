@@ -1,6 +1,7 @@
+import { isSupportedUsage, type ParseDiagnostics } from './log-contract.ts';
 import { costFor, isKnownModel } from './pricing.ts';
 import { parseRfc3339Timestamp } from './timestamp.ts';
-import type { SessionTurn, TokenUsage } from './types.ts';
+import type { SessionTurn } from './types.ts';
 
 export const FORECAST_DAYS = 7;
 export const FORECAST_DISCLAIMER =
@@ -22,7 +23,7 @@ export interface ForecastDailyRow {
 }
 
 export interface ForecastReport {
-	schemaVersion: 1;
+	schemaVersion: 2;
 	command: 'forecast';
 	metric: 'shadow_cost_usd';
 	method: 'trailing-7-complete-local-days-constant-rate-v1';
@@ -62,8 +63,11 @@ export interface ForecastReport {
 	records: {
 		status: 'no-issues-detected' | 'issues-detected';
 		malformedJsonLines: number;
+		unsupportedRecordLines: number;
 		invalidTimestampTurns: number;
 		invalidUsageTurns: number;
+		invalidSubagentMetaFiles: number;
+		ignoredKnownSourceRecords: number;
 	};
 	limitations: string[];
 	disclaimer: string;
@@ -98,63 +102,6 @@ function localTimeZone(): string {
 
 function nonNegativeSafeInteger(value: unknown): value is number {
 	return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function optionalNonNegativeSafeInteger(value: unknown): boolean {
-	return value === undefined || nonNegativeSafeInteger(value);
-}
-
-function validUsage(usage: TokenUsage): boolean {
-	if (!nonNegativeSafeInteger(usage.input_tokens) || !nonNegativeSafeInteger(usage.output_tokens)) {
-		return false;
-	}
-	if (
-		!optionalNonNegativeSafeInteger(usage.cache_creation_input_tokens) ||
-		!optionalNonNegativeSafeInteger(usage.cache_read_input_tokens)
-	) {
-		return false;
-	}
-	if (usage.cache_creation !== undefined) {
-		if (
-			!usage.cache_creation ||
-			typeof usage.cache_creation !== 'object' ||
-			Array.isArray(usage.cache_creation)
-		) {
-			return false;
-		}
-		if (
-			!optionalNonNegativeSafeInteger(usage.cache_creation.ephemeral_5m_input_tokens) ||
-			!optionalNonNegativeSafeInteger(usage.cache_creation.ephemeral_1h_input_tokens)
-		) {
-			return false;
-		}
-		const detailedCacheCreation =
-			(usage.cache_creation.ephemeral_5m_input_tokens ?? 0) +
-			(usage.cache_creation.ephemeral_1h_input_tokens ?? 0);
-		if (!Number.isSafeInteger(detailedCacheCreation)) return false;
-		if (
-			usage.cache_creation_input_tokens !== undefined &&
-			usage.cache_creation_input_tokens !== detailedCacheCreation
-		) {
-			return false;
-		}
-	}
-	if (usage.server_tool_use !== undefined) {
-		if (
-			!usage.server_tool_use ||
-			typeof usage.server_tool_use !== 'object' ||
-			Array.isArray(usage.server_tool_use)
-		) {
-			return false;
-		}
-		if (
-			!optionalNonNegativeSafeInteger(usage.server_tool_use.web_search_requests) ||
-			!optionalNonNegativeSafeInteger(usage.server_tool_use.web_fetch_requests)
-		) {
-			return false;
-		}
-	}
-	return true;
 }
 
 export function forecastWindow(asOf: Date): ForecastWindow {
@@ -213,7 +160,7 @@ export class ForecastAccumulator {
 		// before validation so a coverage gap is never presented as inactivity.
 		row.assistantTurns++;
 		this.assistantTurns++;
-		if (!turn.usage || !validUsage(turn.usage)) {
+		if (!turn.usage || !isSupportedUsage(turn.usage, true)) {
 			this.invalidUsageTurns++;
 			return false;
 		}
@@ -244,7 +191,7 @@ export class ForecastAccumulator {
 		return true;
 	}
 
-	finalize(sourceDiagnostics: { malformedJsonLines?: number } = {}): ForecastReport {
+	finalize(sourceDiagnostics: Partial<ParseDiagnostics> = {}): ForecastReport {
 		const daily = [...this.dailyByDate.values()].map((row) => ({ ...row }));
 		const shadowCostUsd = this.shadowCostUsd;
 		const daysWithActivity = daily.filter((row) => row.assistantTurns > 0).length;
@@ -252,14 +199,41 @@ export class ForecastAccumulator {
 		const malformedJsonLines = nonNegativeSafeInteger(sourceDiagnostics.malformedJsonLines)
 			? sourceDiagnostics.malformedJsonLines
 			: 0;
+		const unsupportedRecordLines = nonNegativeSafeInteger(
+			sourceDiagnostics.unsupportedRecordLines,
+		)
+			? sourceDiagnostics.unsupportedRecordLines
+			: 0;
+		const invalidTimestampTurns =
+			this.invalidTimestampTurns - (sourceDiagnostics.forwardedInvalidTimestampLines ?? 0) +
+			(nonNegativeSafeInteger(sourceDiagnostics.invalidTimestampLines)
+				? sourceDiagnostics.invalidTimestampLines
+				: 0);
+		const invalidUsageTurns =
+			this.invalidUsageTurns - (sourceDiagnostics.forwardedInvalidUsageLines ?? 0) +
+			(nonNegativeSafeInteger(sourceDiagnostics.invalidUsageLines)
+				? sourceDiagnostics.invalidUsageLines
+				: 0);
+		const invalidSubagentMetaFiles = nonNegativeSafeInteger(
+			sourceDiagnostics.invalidSubagentMetaFiles,
+		)
+			? sourceDiagnostics.invalidSubagentMetaFiles
+			: 0;
+		const ignoredKnownSourceRecords = nonNegativeSafeInteger(
+			sourceDiagnostics.ignoredSourceRecordLines,
+		)
+			? sourceDiagnostics.ignoredSourceRecordLines
+			: 0;
 		const pricingPartial = this.unpricedAssistantTurns > 0;
-		const recordIssues =
+		const coverageGaps =
 			malformedJsonLines > 0 ||
-			this.invalidTimestampTurns > 0 ||
-			this.invalidUsageTurns > 0;
-		const amountsAreLowerBounds = pricingPartial || recordIssues;
+			unsupportedRecordLines > 0 ||
+			invalidTimestampTurns > 0 ||
+			invalidUsageTurns > 0;
+		const recordIssues = coverageGaps || invalidSubagentMetaFiles > 0;
+		const amountsAreLowerBounds = pricingPartial || coverageGaps;
 		return {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			command: 'forecast',
 			metric: 'shadow_cost_usd',
 			method: 'trailing-7-complete-local-days-constant-rate-v1',
@@ -298,8 +272,11 @@ export class ForecastAccumulator {
 			records: {
 				status: recordIssues ? 'issues-detected' : 'no-issues-detected',
 				malformedJsonLines,
-				invalidTimestampTurns: this.invalidTimestampTurns,
-				invalidUsageTurns: this.invalidUsageTurns,
+				unsupportedRecordLines,
+				invalidTimestampTurns,
+				invalidUsageTurns,
+				invalidSubagentMetaFiles,
+				ignoredKnownSourceRecords,
 			},
 			limitations: [
 				'constant_rate',
@@ -348,11 +325,17 @@ function recordDescription(report: ForecastReport): string {
 	if (report.records.malformedJsonLines > 0) {
 		issues.push(`${report.records.malformedJsonLines} malformed JSON line(s)`);
 	}
+	if (report.records.unsupportedRecordLines > 0) {
+		issues.push(`${report.records.unsupportedRecordLines} unsupported record line(s)`);
+	}
 	if (report.records.invalidTimestampTurns > 0) {
 		issues.push(`${report.records.invalidTimestampTurns} invalid-timestamp turn(s)`);
 	}
 	if (report.records.invalidUsageTurns > 0) {
 		issues.push(`${report.records.invalidUsageTurns} invalid-usage turn(s)`);
+	}
+	if (report.records.invalidSubagentMetaFiles > 0) {
+		issues.push(`${report.records.invalidSubagentMetaFiles} invalid subagent metadata file(s)`);
 	}
 	return `issues detected · excluded: ${issues.join(', ')}`;
 }

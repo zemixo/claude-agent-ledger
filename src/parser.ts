@@ -2,8 +2,18 @@ import { constants } from 'node:fs';
 import { access, lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import {
+	LOG_SHAPE_IDS,
+	addParseDiagnostic,
+	classifyLogRecord,
+	isSupportedSubagentMeta,
+	type ParseDiagnostics,
+	isSupportedUsage,
+} from './log-contract.ts';
 import { parseRfc3339Timestamp } from './timestamp.ts';
 import type { SessionTurn, TokenUsage } from './types.ts';
+
+export type { ParseDiagnostics } from './log-contract.ts';
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
@@ -16,20 +26,17 @@ export interface ParseOptions {
 	projectsDir?: string;
 	onSessionLog?: (sessionId: string) => void;
 	onSkippedRecord?: (reason: string) => void;
-	/** Fail on unreadable paths and reject nested symlinks. */
-	strictSource?: boolean;
-	/** Deliver invalid timestamps only to callers that explicitly diagnose them. */
+	/** Preserve invalid evidence only for validating consumers such as forecast. */
 	includeInvalidTimestamps?: boolean;
-	/** Forecast requires explicit RFC3339 instants; legacy aggregate parsing remains unchanged. */
-	strictTimestamps?: boolean;
-	/** Preserve invalid or incomplete usage for a validating caller, never aggregation. */
 	includeInvalidUsage?: boolean;
+	/** Forecast requires explicit RFC3339 instants; aggregates retain legacy dates. */
+	strictTimestamps?: boolean;
+	/** Fail instead of silently skipping unreadable paths; reject nested symlinks. */
+	strictSource?: boolean;
 	diagnostics?: ParseDiagnostics;
 }
 
-export interface ParseDiagnostics {
-	malformedJsonLines: number;
-}
+type ParseRange = Pick<ParseOptions, 'from' | 'to' | 'strictTimestamps'>;
 
 export class LogSourceError extends Error {
 	constructor(readonly reason: 'unreadable-directory' | 'uninspectable-path' | 'symbolic-link', options?: ErrorOptions) {
@@ -52,6 +59,7 @@ type ReadyOutcome<T> =
 export async function* findSessionLogs(
 	projectsDir: string = CLAUDE_PROJECTS_DIR,
 	strictSource = false,
+	diagnostics?: ParseDiagnostics,
 ): AsyncGenerator<LogFile> {
 	const projects = await readDirectory(projectsDir, strictSource);
 	// Parallelize project-level walks, then retain the discovered file metadata.
@@ -65,7 +73,7 @@ export async function* findSessionLogs(
 			}
 			if (!info.isDirectory()) return [];
 		}
-		return collectWalk(projectPath, project, strictSource);
+		return collectWalk(projectPath, project, strictSource, diagnostics);
 	});
 	const settled = await Promise.all(walkers);
 	for (const list of settled) {
@@ -77,16 +85,17 @@ async function collectWalk(
 	dir: string,
 	projectId: string,
 	strictSource: boolean,
+	diagnostics: ParseDiagnostics | undefined,
 ): Promise<LogFile[]> {
 	const out: LogFile[] = [];
-	for await (const lf of walkForJsonl(dir, projectId, strictSource, new Set())) out.push(lf);
+	for await (const lf of walkForJsonl(dir, projectId, strictSource, diagnostics, new Set())) out.push(lf);
 	return out;
 }
 
 async function readDirectory(dir: string, strictSource: boolean): Promise<string[]> {
 	try {
 		if (strictSource) await access(dir, constants.R_OK | constants.X_OK);
-		return await readdir(dir);
+		return (await readdir(dir)).sort();
 	} catch (error) {
 		if (strictSource) {
 			throw new LogSourceError('unreadable-directory', { cause: error });
@@ -110,6 +119,7 @@ async function* walkForJsonl(
 	dir: string,
 	projectId: string,
 	strictSource: boolean,
+	diagnostics: ParseDiagnostics | undefined,
 	visited: Set<string>,
 ): AsyncGenerator<LogFile> {
 	try {
@@ -133,12 +143,12 @@ async function* walkForJsonl(
 			throw new LogSourceError('symbolic-link');
 		}
 		if (info.isDirectory()) {
-			yield* walkForJsonl(full, projectId, strictSource, visited);
+			yield* walkForJsonl(full, projectId, strictSource, diagnostics, visited);
 			continue;
 		}
 		if (name.endsWith('.jsonl')) {
 			if (strictSource) await access(full, constants.R_OK);
-			const subagentType = await resolveSubagentType(full);
+			const subagentType = await resolveSubagentType(full, diagnostics);
 			yield {
 				path: full,
 				projectId,
@@ -149,20 +159,31 @@ async function* walkForJsonl(
 	}
 }
 
-async function resolveSubagentType(jsonlPath: string): Promise<string | undefined> {
+async function resolveSubagentType(
+	jsonlPath: string,
+	diagnostics?: ParseDiagnostics,
+): Promise<string | undefined> {
 	if (basename(dirname(jsonlPath)) !== 'subagents') return undefined;
 	const metaPath = jsonlPath.replace(/\.jsonl$/, '.meta.json');
 	try {
 		const text = await Bun.file(metaPath).text();
-		const meta = JSON.parse(text) as { agentType?: string };
+		const meta: unknown = JSON.parse(text);
+		if (!isSupportedSubagentMeta(meta)) throw new TypeError('unsupported subagent metadata');
 		return meta.agentType;
 	} catch {
+		addParseDiagnostic(diagnostics, {
+			code: 'invalid-subagent-meta',
+			expectedShape: LOG_SHAPE_IDS.subagentMeta,
+			source: basename(metaPath),
+			reason: 'subagent metadata must contain a non-empty string agentType',
+		});
 		return undefined;
 	}
 }
 
 // Streaming line reader — does NOT buffer the whole file.
-// Handles partial lines across chunk boundaries. Skips malformed JSON.
+// Handles partial lines across chunk boundaries. Malformed JSON is skipped and
+// counted when the caller supplies diagnostics.
 export async function* parseFile(
 	path: string,
 	subagentType?: string,
@@ -171,121 +192,199 @@ export async function* parseFile(
 	onSkippedRecord?: (reason: string) => void,
 	opts: ParseOptions = {},
 ): AsyncGenerator<SessionTurn> {
+	const { diagnostics } = opts;
 	const sessionId = basename(path).replace('.jsonl', '');
 	const stream = Bun.file(path).stream();
 	const decoder = new TextDecoder('utf-8', { fatal: false });
 	let buffer = '';
+	let lineNumber = 0;
 	for await (const chunk of stream) {
 		buffer += decoder.decode(chunk, { stream: true });
 		let nl: number;
 		while ((nl = buffer.indexOf('\n')) !== -1) {
+			lineNumber++;
 			const line = buffer.slice(0, nl);
 			buffer = buffer.slice(nl + 1);
 			if (!line.trim()) continue;
-			const turn = tryParseLine(line, sessionId, subagentType, projectId, parentSessionId, onSkippedRecord, opts);
+			const turn = tryParseLine(
+				line,
+				sessionId,
+				subagentType,
+				projectId,
+				parentSessionId,
+				diagnostics,
+				basename(path),
+				lineNumber,
+				opts,
+				onSkippedRecord,
+			);
 			if (turn) yield turn;
 		}
 	}
 	// Flush any trailing partial line.
 	buffer += decoder.decode();
 	if (buffer.trim()) {
-		const turn = tryParseLine(buffer, sessionId, subagentType, projectId, parentSessionId, onSkippedRecord, opts);
+		lineNumber++;
+		const turn = tryParseLine(
+			buffer,
+			sessionId,
+			subagentType,
+			projectId,
+			parentSessionId,
+			diagnostics,
+			basename(path),
+			lineNumber,
+			opts,
+			onSkippedRecord,
+		);
 		if (turn) yield turn;
 	}
 }
 
 function tryParseLine(
-	line: string,
+	recordLine: string,
 	sessionId: string,
 	subagentType: string | undefined,
 	projectId: string | undefined,
 	parentSessionId: string | undefined,
+	diagnostics: ParseDiagnostics | undefined,
+	source: string,
+	lineNumber: number,
+	opts: ParseOptions,
 	onSkippedRecord?: (reason: string) => void,
-	opts: ParseOptions = {},
 ): SessionTurn | undefined {
-	let obj: unknown;
+	let parsed: unknown;
 	try {
-		obj = JSON.parse(line);
+		parsed = JSON.parse(recordLine);
 	} catch {
 		onSkippedRecord?.('invalid_json');
-		if (opts.diagnostics) opts.diagnostics.malformedJsonLines++;
+		addParseDiagnostic(diagnostics, {
+			code: 'malformed-json',
+			expectedShape: LOG_SHAPE_IDS.assistantUsage,
+			source,
+			line: lineNumber,
+			reason: 'line is not valid JSON',
+		});
 		return undefined;
 	}
-	if (!isRecord(obj)) {
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		onSkippedRecord?.('invalid_record');
-		if (opts.diagnostics) opts.diagnostics.malformedJsonLines++;
+		addParseDiagnostic(diagnostics, {
+			code: 'unsupported-json-root',
+			expectedShape: LOG_SHAPE_IDS.assistantUsage,
+			source,
+			line: lineNumber,
+			reason: 'JSON line must contain an object',
+		});
 		return undefined;
 	}
-	const msg = isRecord(obj.message) ? obj.message : {};
-	const type = obj.type ?? msg.role;
-	if (typeof type !== 'string' || !['assistant', 'user', 'summary', 'system'].includes(type)) return undefined;
-	const timestampValid = opts.strictTimestamps
-		? Boolean(parseRfc3339Timestamp(obj.timestamp))
-		: typeof obj.timestamp === 'string' && Number.isFinite(Date.parse(obj.timestamp));
-	if (!timestampValid) {
-		if (!opts.includeInvalidTimestamps) {
-			onSkippedRecord?.('invalid_timestamp');
-			return undefined;
-		}
+	const obj = parsed as Record<string, unknown>;
+	const classification = classifyLogRecord(obj, {
+		strictTimestamps: opts.strictTimestamps ?? false,
+		requireCacheAgreement: opts.strictTimestamps ?? false,
+		allowPartialUsage: !opts.includeInvalidUsage && !opts.strictTimestamps,
+	});
+	if (classification.status === 'ignored') {
+		if (diagnostics) diagnostics.ignoredSourceRecordLines++;
+		return undefined;
 	}
-	if (msg.model !== undefined && typeof msg.model !== 'string') {
-		if (!opts.includeInvalidUsage) {
-			onSkippedRecord?.('invalid_model');
-			return undefined;
+	if (classification.status === 'invalid') {
+		const inRange = diagnosticMatchesRange(obj, opts);
+		const timestampIssue = classification.code === 'invalid-assistant-timestamp';
+		const usageIssue = ['invalid-assistant-message', 'invalid-assistant-model',
+			'invalid-assistant-usage', 'unexpected-assistant-usage-location'].includes(classification.code);
+		const forward = (timestampIssue && opts.includeInvalidTimestamps) ||
+			(usageIssue && opts.includeInvalidUsage);
+		if (inRange) {
+			addParseDiagnostic(diagnostics, {
+				code: classification.code, expectedShape: classification.expectedShape,
+				source, line: lineNumber, reason: classification.reason,
+			});
 		}
-	}
-	if (msg.usage !== undefined && !validUsage(msg.usage)) {
-		if (!opts.includeInvalidUsage) {
-			onSkippedRecord?.('invalid_usage');
-			return undefined;
+		if (forward) {
+			const msg = obj.message && typeof obj.message === 'object' && !Array.isArray(obj.message)
+				? obj.message as Record<string, unknown> : {};
+			// Unsupported fields are not retained. Invalid numeric counters remain
+			// available to the validating consumer without retaining record bodies.
+			const usage = classification.code === 'unexpected-assistant-usage-location'
+				? undefined : usageEvidence(msg.usage);
+			if (inRange && diagnostics) {
+				if (timestampIssue) diagnostics.forwardedInvalidTimestampLines++;
+				else if (!isSupportedUsage(usage, true)) diagnostics.forwardedInvalidUsageLines++;
+			}
+			return extractTurn(obj, msg, usage,
+				typeof msg.model === 'string' ? msg.model : undefined,
+				sessionId, subagentType, projectId, parentSessionId);
 		}
+		onSkippedRecord?.(timestampIssue ? 'invalid_timestamp' : usageIssue ? 'invalid_usage' : 'invalid_record');
+		return undefined;
 	}
-	return extractTurn(obj, sessionId, subagentType, projectId, parentSessionId, opts.includeInvalidUsage);
+	return extractTurn(
+		obj,
+		classification.message,
+		classification.usage,
+		classification.model,
+		sessionId,
+		subagentType,
+		projectId,
+		parentSessionId,
+	);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === 'object' && !Array.isArray(value);
+function parseTimestamp(value: unknown, strict = false): Date | undefined {
+	if (strict) return parseRfc3339Timestamp(value);
+	return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value) : undefined;
 }
 
-function validCounters(value: Record<string, unknown>, keys: string[]): boolean {
-	return keys.every((key) => value[key] === undefined || (
-		typeof value[key] === 'number' && Number.isSafeInteger(value[key]) && (value[key] as number) >= 0
-	));
-}
-
-function validUsage(value: unknown): value is TokenUsage {
-	if (!isRecord(value) || !validCounters(value, [
-		'input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens',
-	])) return false;
-	for (const [field, keys] of [
-		['cache_creation', ['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens']],
-		['server_tool_use', ['web_search_requests', 'web_fetch_requests']],
-	] as const) {
-		const detail = value[field];
-		if (detail !== undefined && (!isRecord(detail) || !validCounters(detail, [...keys]))) return false;
+function usageEvidence(value: unknown): TokenUsage | undefined {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+	const usage = value as Record<string, unknown>;
+	// Keep only cost counters: unknown fields could contain private bodies.
+	const allowed = new Set(['input_tokens', 'output_tokens', 'cache_creation_input_tokens',
+		'cache_read_input_tokens', 'cache_creation', 'server_tool_use', 'service_tier', 'inference_geo', 'speed', 'iterations']);
+	if (Object.keys(usage).some((key) => !allowed.has(key))) return undefined;
+	const projected: Record<string, unknown> = {};
+	for (const key of ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens']) {
+		if (key in usage) projected[key] = typeof usage[key] === 'number' ? usage[key] : NaN;
 	}
+	if (usage.cache_creation !== undefined) {
+		const cache = usage.cache_creation;
+		if (!cache || typeof cache !== 'object' || Array.isArray(cache)) return undefined;
+		if (Object.keys(cache).some((key) => !['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens'].includes(key))) return undefined;
+		projected.cache_creation = Object.fromEntries(Object.entries(cache).map(([key, value]) => [key, typeof value === 'number' ? value : NaN]));
+	}
+	if (usage.server_tool_use !== undefined) {
+		const tools = usage.server_tool_use;
+		if (!tools || typeof tools !== 'object' || Array.isArray(tools)) return undefined;
+		if (Object.keys(tools).some((key) => !['web_search_requests', 'web_fetch_requests'].includes(key))) return undefined;
+		projected.server_tool_use = Object.fromEntries(Object.entries(tools).map(([key, value]) => [key, typeof value === 'number' ? value : NaN]));
+	}
+	// Projection must not turn an unsupported shape into billable usage.
+	if (!isSupportedUsage(value, true) && isSupportedUsage(projected, true)) return undefined;
+	return projected as unknown as TokenUsage;
+}
+
+function diagnosticMatchesRange(record: Record<string, unknown>, range: ParseRange): boolean {
+	const timestamp = parseTimestamp(record.timestamp, range.strictTimestamps);
+	if (!timestamp) return true;
+	if (range.from && timestamp < range.from) return false;
+	if (range.to && timestamp > range.to) return false;
 	return true;
 }
 
 function extractTurn(
 	obj: Record<string, unknown>,
+	msg: Record<string, unknown>,
+	usage: SessionTurn['usage'],
+	model: string | undefined,
 	sessionId: string,
 	subagentType: string | undefined,
 	projectId: string | undefined,
 	parentSessionId: string | undefined,
-	preserveUsage = false,
 ): SessionTurn {
-	const msg = isRecord(obj.message) ? obj.message : {};
-	const rawUsage = msg.usage as TokenUsage | undefined;
-	const usage = preserveUsage ? rawUsage : rawUsage ? {
-		...rawUsage,
-		input_tokens: rawUsage.input_tokens ?? 0,
-		output_tokens: rawUsage.output_tokens ?? 0,
-	} : undefined;
-	const model = typeof msg.model === 'string' ? msg.model : undefined;
-	const perTurnSubagent = typeof obj.subagentType === 'string' ? obj.subagentType || undefined : undefined;
-	const perTurnProject = typeof obj.projectId === 'string' ? obj.projectId || undefined : undefined;
-	const perTurnParent = typeof obj.parentSessionId === 'string' ? obj.parentSessionId || undefined : undefined;
+	const perTurnSubagent = optionalNonEmptyString(obj.subagentType);
+	const perTurnProject = optionalNonEmptyString(obj.projectId);
+	const perTurnParent = optionalNonEmptyString(obj.parentSessionId);
 
 	// Extract tool_use blocks from the assistant message content (if any).
 	// Used by the --by tool aggregator and subagent-graph attribution.
@@ -303,7 +402,7 @@ function extractTurn(
 	}
 
 	return {
-		type: (obj.type ?? msg.role) as SessionTurn['type'],
+		type: 'assistant',
 		timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : '',
 		sessionId,
 		projectId: perTurnProject ?? projectId,
@@ -312,8 +411,11 @@ function extractTurn(
 		model,
 		usage,
 		toolUses: toolUses.length > 0 ? toolUses : undefined,
-		raw: obj,
 	};
+}
+
+function optionalNonEmptyString(value: unknown): string | undefined {
+	return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 // Yield whichever stream produces a value first. Each iterator has at most one
@@ -403,10 +505,8 @@ async function* filterByRange(
 	opts: ParseOptions,
 ): AsyncGenerator<SessionTurn> {
 	for await (const turn of turns) {
-		const timestamp = opts.strictTimestamps
-			? parseRfc3339Timestamp(turn.timestamp)
-			: new Date(turn.timestamp);
-		if (!timestamp || !Number.isFinite(timestamp.getTime())) {
+		const timestamp = parseTimestamp(turn.timestamp, opts.strictTimestamps);
+		if (!timestamp) {
 			if (opts.includeInvalidTimestamps) yield turn;
 			continue;
 		}
@@ -429,7 +529,14 @@ export async function* streamLogFiles(
 		const batch = files.slice(i, i + CONCURRENCY);
 		const streams = batch.map((file) =>
 			filterByRange(
-				readLog(file.path, file.subagentType, file.projectId, file.parentSessionId, opts.onSkippedRecord, opts),
+				readLog(
+					file.path,
+					file.subagentType,
+					file.projectId,
+					file.parentSessionId,
+					opts.onSkippedRecord,
+					opts,
+				),
 				opts,
 			),
 		);
@@ -442,7 +549,7 @@ export async function* streamLogFiles(
 export async function* parseAll(opts: ParseOptions = {}): AsyncGenerator<SessionTurn> {
 	const dir = opts.projectsDir ?? CLAUDE_PROJECTS_DIR;
 	const files: LogFile[] = [];
-	for await (const file of findSessionLogs(dir, opts.strictSource)) {
+	for await (const file of findSessionLogs(dir, opts.strictSource, opts.diagnostics)) {
 		files.push(file);
 		opts.onSessionLog?.(basename(file.path, '.jsonl'));
 	}

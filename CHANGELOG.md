@@ -12,23 +12,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `agent-ledger forecast` with a seven-complete-local-day basis and an
   equally sized constant-rate projection over the next seven complete days.
 - Include seven daily basis rows, activity coverage, captured pricing time,
-  plan context, and separate pricing/record diagnostics in a versioned v1 JSON
+  plan context, and separate pricing/record diagnostics in a versioned v2 JSON
   schema.
 - Mark every reported amount as a lower bound when model pricing or detected
   record coverage is incomplete, while keeping JSON stdout clean and reporting
-  one gap warning on stderr.
+  coverage warnings on stderr.
 - Freeze rates at `pricing.asOf`; scheduled price changes in the projection
   window are deliberately not simulated.
+- Define a tool-owned log contract with named, versioned, fully synthetic
+  fixtures for assistant usage, context events, auxiliary events, and subagent
+  sidecars.
+- Emit bounded machine-readable diagnostics for malformed JSON, unknown record
+  types, invalid assistant timestamps/usage, and invalid subagent metadata.
+- Surface those diagnostics from aggregate, forecast, watch, and explain flows;
+  watch deduplicates unchanged warnings, and explain fails closed when an
+  existing session contains no supported billable turns.
 
 ### Changed
 
 - Treat missing, unreadable, or untraversable source paths and nested symbolic
   links as forecast errors instead of presenting a partial scan as trustworthy
   zero activity.
-- Preserve missing timestamps as invalid records and expose malformed-line
-  diagnostics to forecast callers instead of inventing a current timestamp or
-  silently authenticating incomplete data; validate timestamps as RFC3339
-  calendar values instead of relying on JavaScript's permissive normalization.
+- Reject missing timestamps and expose malformed-line diagnostics instead of
+  inventing a current timestamp or silently accepting incomplete data; validate
+  forecast timestamps as RFC3339 calendar values while retaining supported
+  legacy date strings in aggregate and explain commands.
+- Retain only billing and attribution fields in parsed turns. Forecast keeps
+  invalid assistant activity evidence without including its costs. Known context
+  and auxiliary records are ignored; prompt, response, tool, attachment, and
+  arbitrary usage metadata payloads are not retained.
+- Reject unknown cost-bearing usage keys and unknown nested cache/server-tool
+  keys under the v1 contract, unexpected direct usage on known non-billable
+  records, and assistant usage outside `message.usage`, so upstream shape drift
+  is reported instead of silently undercounted. Scope timestamped invalid
+  records to the requested date range while retaining unassignable diagnostics
+  source-wide.
 
 ### Fixed
 

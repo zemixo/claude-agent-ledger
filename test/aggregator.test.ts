@@ -19,7 +19,6 @@ function zeroCostTurn(
 		parentSessionId,
 		model: '<synthetic>',
 		usage: { input_tokens: 0, output_tokens: 0 },
-		raw: null,
 	};
 }
 
@@ -30,7 +29,6 @@ function sonnet5Turn(timestamp: string): SessionTurn {
 		sessionId: 'pricing-boundary-session',
 		model: 'claude-sonnet-5',
 		usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-		raw: {},
 	};
 }
 
@@ -41,7 +39,6 @@ function sessionTurn(sessionId: string, inputTokens: number): SessionTurn {
 		sessionId,
 		model: 'claude-sonnet-4-6',
 		usage: { input_tokens: inputTokens, output_tokens: 0 },
-		raw: {},
 	};
 }
 
@@ -54,7 +51,6 @@ function pricedTurn(sessionId: string, parentSessionId?: string): SessionTurn {
 		parentSessionId,
 		model: 'claude-sonnet-4-6',
 		usage: { input_tokens: 1_000_000, output_tokens: 0 },
-		raw: null,
 	};
 }
 
@@ -65,8 +61,8 @@ describe('aggregate()', () => {
 		const report = await aggregate(parseFile(FIXTURE), from, to);
 
 		const agents = report.rows.map((r) => r.subagent);
-		expect(agents).toContain('ios-factory');
-		expect(agents).toContain('Reality Checker');
+		expect(agents).toContain('synthetic-a');
+		expect(agents).toContain('synthetic-b');
 		expect(agents).toContain('(main)');
 	});
 

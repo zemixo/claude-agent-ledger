@@ -9,6 +9,7 @@
 
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
+import type { ParseDiagnostics } from './log-contract.ts';
 import { findSessionLogs, parseFile } from './parser.ts';
 import { costFor, costForTimestamp } from './pricing.ts';
 import type { SessionTurn } from './types.ts';
@@ -77,11 +78,14 @@ async function findSessionFile(sessionPrefix: string): Promise<string | undefine
 	return match;
 }
 
-export async function analyzeSession(sessionPrefix: string): Promise<SessionAnalysis | undefined> {
+export async function analyzeSession(
+	sessionPrefix: string,
+	diagnostics?: ParseDiagnostics,
+): Promise<SessionAnalysis | undefined> {
 	const path = await findSessionFile(sessionPrefix);
 	if (!path) return undefined;
 	const turns: SessionTurn[] = [];
-	for await (const t of parseFile(path)) turns.push(t);
+	for await (const t of parseFile(path, undefined, undefined, undefined, undefined, { diagnostics })) turns.push(t);
 	return analyzeTurns(turns, sessionPrefix);
 }
 
@@ -110,7 +114,9 @@ export function analyzeTurns(turns: SessionTurn[], sessionPrefix: string): Sessi
 		for (const t of turn.toolUses ?? []) {
 			tools.set(t, (tools.get(t) ?? 0) + 1);
 		}
-		const fiveMin = turn.usage.cache_creation?.ephemeral_5m_input_tokens ?? turn.usage.cache_creation_input_tokens ?? 0;
+		const fiveMin = turn.usage.cache_creation
+			? turn.usage.cache_creation.ephemeral_5m_input_tokens ?? 0
+			: turn.usage.cache_creation_input_tokens ?? 0;
 		const oneH = turn.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
 		totalCacheRead += turn.usage.cache_read_input_tokens ?? 0;
 		totalCacheWrite += fiveMin + oneH;

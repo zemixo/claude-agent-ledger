@@ -1,0 +1,40 @@
+{
+  "contractVersion": 1,
+  "cases": [
+    {
+      "name": "current assistant usage envelope",
+      "shapeId": "claude-code.assistant-usage/v1",
+      "file": "assistant-current.jsonl",
+      "disposition": "accepted",
+      "records": 1
+    },
+    {
+      "name": "legacy flat-cache assistant usage envelope",
+      "shapeId": "claude-code.assistant-usage/v1",
+      "file": "assistant-legacy.jsonl",
+      "disposition": "accepted",
+      "records": 1
+    },
+    {
+      "name": "known context events",
+      "shapeId": "claude-code.context-event/v1",
+      "file": "context-known.jsonl",
+      "disposition": "ignored",
+      "records": 3
+    },
+    {
+      "name": "known auxiliary events",
+      "shapeId": "claude-code.auxiliary-event/v1",
+      "file": "metadata-known.jsonl",
+      "disposition": "ignored",
+      "records": 7
+    },
+    {
+      "name": "current subagent metadata",
+      "shapeId": "claude-code.subagent-meta/v1",
+      "file": "subagent.meta.json",
+      "disposition": "accepted",
+      "records": 1
+    }
+  ]
+}

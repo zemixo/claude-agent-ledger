@@ -49,7 +49,7 @@ agent-ledger today --budget 50     # CI gate: exit 2 if today > $50
 agent-ledger week --json | jq      # JSON output for any view, including summary
 agent-ledger month --md > report.md
 agent-ledger forecast --plan max   # next 7 complete days at the last 7-day rate
-agent-ledger forecast --json | jq  # versioned v1 schema with basis + coverage diagnostics
+agent-ledger forecast --json | jq  # versioned v2 schema with basis + coverage diagnostics
 
 # Live tail — polling delta meter
 agent-ledger watch                          # refresh every 10s
@@ -154,28 +154,33 @@ Every observed usage record is repriced with the one rate snapshot captured at
 price changes inside the projection window are not modeled.
 
 Unknown or missing model prices are never guessed. Their turns still count as
-activity. Detected malformed JSON, invalid timestamps, and invalid usage are
-reported separately from pricing coverage. If either kind of gap exists, text
-output uses a `≥` marker, JSON sets the top-level `amountsAreLowerBounds` for
-every basis, daily, average, and projection amount, and stderr reports one
-coverage warning without contaminating JSON stdout.
+activity. Detected malformed JSON, unsupported records, invalid timestamps, and
+invalid usage are reported separately from pricing coverage. If either kind of
+gap exists, text output uses a `≥` marker, JSON sets the top-level
+`amountsAreLowerBounds` for every basis, daily, average, and projection amount,
+and stderr reports
+coverage warnings without contaminating JSON stdout.
 
 A readable but empty projects directory produces an explicit `no-activity`
 report. Forecast scanning fails closed on missing, unreadable, or untraversable
 source paths and on nested symbolic links, rather than silently presenting a
 partial tree as trustworthy `$0` activity. Record diagnostics describe issues
 the parser detected; they are not an invoice-completeness certification.
-Malformed-line diagnostics are source-wide because a line without a valid
-timestamp cannot be assigned safely to the seven-day basis. Timestamps must be
-valid RFC3339 values with an explicit UTC marker or numeric offset.
+Diagnostics for records with a valid timestamp are scoped to the requested
+seven-day basis. Malformed JSON, invalid timestamps, and other records whose
+timestamp cannot be established remain source-wide because they cannot be
+assigned safely to a date window. The count of known non-billable records is
+also source-wide and informational; it does not make forecast amounts lower
+bounds. Timestamps must be valid RFC3339 values with an explicit UTC marker or
+numeric offset.
 
 ## How it works
 
-Claude Code writes every conversation turn to `~/.claude/projects/<encoded-path>/*.jsonl`.
-Each turn records input/output tokens, cache tokens (with TTL split), the model used,
-and any `server_tool_use` (web_search / web_fetch) requests. Subagent invocations live
-under `<session>/subagents/agent-*.jsonl`, with a sidecar `.meta.json` carrying the real
-subagent name (e.g. `Reality Checker`, `ios-factory`).
+Claude Code writes session records to `~/.claude/projects/<encoded-path>/*.jsonl`.
+Assistant usage records include input/output tokens, cache tokens (with TTL split),
+the model used, and any `server_tool_use` (web_search / web_fetch) requests.
+Subagent invocations live under `<session>/subagents/agent-*.jsonl`, with a
+sidecar `.meta.json` carrying the subagent name.
 
 `claude-agent-ledger` walks the tree, resolves subagent types from the sidecar
 metadata, and aggregates by your chosen key. Pricing is applied locally from
@@ -186,6 +191,50 @@ The tree view displays up to 20 highest-cost roots. Its grand total and
 `--budget` check still include every selected turn, including roots outside the
 display cap. When a parent is outside the selected period, its in-range child is
 shown as a root instead of being dropped.
+
+### Log compatibility contract
+
+The parser owns an explicit `v1` compatibility contract rather than treating
+Claude Code's top-level `version` field as a schema promise. Its fully synthetic
+fixtures live in `test/fixtures/log-contract/v1/` and name four supported shapes:
+
+- `claude-code.assistant-usage/v1` is validated and included in totals.
+- `claude-code.context-event/v1` covers known user/system context and is ignored.
+- `claude-code.auxiliary-event/v1` covers known metadata and is ignored, even
+  when it has no timestamp.
+- `claude-code.subagent-meta/v1` supplies optional attribution from sidecars.
+
+Malformed JSON, unknown record types, and incompatible assistant usage are
+skipped with bounded diagnostics on stderr. The v1 usage shape uses explicit
+allowlists for cost-bearing fields and the nested cache/server-tool namespaces;
+new fields therefore fail visibly instead of being silently omitted from cost.
+Known non-billable records remain tolerant of harmless metadata, but a direct
+`usage` or `message.usage` field is rejected as contract drift. Assistant usage
+is accepted only at `message.usage`; legacy envelopes may identify assistant
+records with `message.role` when top-level `type` is absent. Aggregate and
+explain commands retain valid legacy date strings and omitted input/output
+counters (normalized to zero). Explicit null or invalid counters are rejected.
+Forecast requires explicit RFC3339 instants and complete counters; invalid
+assistant records still count as observed activity when their timestamp is
+valid, while their cost is excluded.
+Each diagnostic contains only a reason code, expected shape, source filename,
+and line number; it never echoes the source record. `--anonymize` also replaces
+the source filename. At most five samples are retained, so repeated damage
+cannot make parser memory grow with the number of bad lines. Aggregate JSON
+remains valid on stdout. `watch` reports diagnostics on the first scan and only
+when they change; `explain` exits with an error if validation leaves an existing
+session with no supported billable turns.
+
+Only fields required for cost and attribution enter `SessionTurn`; prompt,
+response, thinking, tool input/result, attachment bodies, and arbitrary usage
+metadata such as iterations are not retained. Validated server-tool request
+counters remain available for cost calculation.
+When both flat and TTL-split cache-creation counters are present, both are
+validated and the TTL-split counters determine the cost breakdown; the flat
+counter remains the fallback for older records. Forecast additionally rejects
+conflicting flat and TTL-split totals and marks its amounts as lower bounds.
+If a new Claude Code shape appears, open an issue with a from-scratch synthetic
+fixture or a carefully redacted minimal reproduction—never upload a raw log.
 
 ### Cache accounting
 
@@ -260,6 +309,7 @@ before making billing decisions. Historical aggregate, tree, and explain views
 select date-dependent rates from each turn's logged timestamp, so a scheduled
 price change does not retroactively reprice earlier usage.
 
+- [x] Versioned log contract with bounded, privacy-safe diagnostics
 - [x] Log parser (bounded JSONL streaming, recursive subagent discovery)
 - [x] Per-subagent aggregation
 - [x] Per-model aggregation (`--by model`)

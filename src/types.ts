@@ -42,7 +42,6 @@ export interface SessionTurn {
 	model?: ModelId | undefined;
 	usage?: TokenUsage | undefined;
 	toolUses?: string[] | undefined; // tool names invoked in this assistant turn
-	raw: unknown;
 }
 
 export interface CostBreakdown {

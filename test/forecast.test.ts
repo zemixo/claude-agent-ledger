@@ -30,7 +30,6 @@ function turn(
 				input_tokens: options.input ?? 1_000_000,
 				output_tokens: options.output ?? 0,
 			},
-		raw: null,
 	};
 }
 
@@ -111,7 +110,7 @@ describe('forecast calendar windows', () => {
 			const accumulator = new mod.ForecastAccumulator(new Date('2026-11-02T20:00:00.000Z'));
 			const makeTurn = (timestamp) => ({
 				type: 'assistant', timestamp, sessionId: 'dst', model: 'claude-sonnet-4-6',
-				usage: { input_tokens: 1000000, output_tokens: 0 }, raw: null
+				usage: { input_tokens: 1000000, output_tokens: 0 }
 			});
 			accumulator.add(makeTurn('2026-11-01T08:30:00.000Z'));
 			accumulator.add(makeTurn('2026-11-01T09:30:00.000Z'));
@@ -145,7 +144,7 @@ describe('forecast calendar windows', () => {
 			const accumulator = new mod.ForecastAccumulator(new Date('2026-11-02T20:00:00.000Z'));
 			const makeTurn = (timestamp) => ({
 				type: 'assistant', timestamp, sessionId: 'dst', model: 'claude-sonnet-4-6',
-				usage: { input_tokens: 1000000, output_tokens: 0 }, raw: null
+				usage: { input_tokens: 1000000, output_tokens: 0 }
 			});
 			accumulator.add(makeTurn('2026-11-01T06:30:00.000Z'));
 			accumulator.add(makeTurn('2026-11-01T07:30:00.000Z'));
@@ -231,7 +230,7 @@ describe('ForecastAccumulator', () => {
 		expect(formatForecast(report)).toContain('$0 is not a claim of future inactivity');
 	});
 
-	test('keeps the versioned v1 JSON field contract explicit', () => {
+	test('keeps the versioned v2 JSON field contract explicit', () => {
 		const report = new ForecastAccumulator(new Date('2026-08-03T12:00:00.000Z')).finalize();
 		expect(Object.keys(report).sort()).toEqual(
 			[
@@ -287,10 +286,13 @@ describe('ForecastAccumulator', () => {
 		);
 		expect(Object.keys(report.records).sort()).toEqual(
 			[
+				'ignoredKnownSourceRecords',
+				'invalidSubagentMetaFiles',
 				'invalidTimestampTurns',
 				'invalidUsageTurns',
 				'malformedJsonLines',
 				'status',
+				'unsupportedRecordLines',
 			].sort(),
 		);
 		expect(Object.keys(report.basis.daily[0] ?? {}).sort()).toEqual(
@@ -328,8 +330,11 @@ describe('ForecastAccumulator', () => {
 		expect(report.records).toEqual({
 			status: 'issues-detected',
 			malformedJsonLines: 1,
+			unsupportedRecordLines: 0,
 			invalidTimestampTurns: 3,
 			invalidUsageTurns: 1,
+			invalidSubagentMetaFiles: 0,
+			ignoredKnownSourceRecords: 0,
 		});
 		expect(report.amountsAreLowerBounds).toBe(true);
 	});
@@ -376,10 +381,9 @@ describe('ForecastAccumulator', () => {
 				cache_creation: [],
 			},
 			{
-				input_tokens: 0,
-				output_tokens: 0,
-				cache_creation_input_tokens: 1_000_000,
-				cache_creation: {},
+				input_tokens: 1,
+				output_tokens: 1,
+				cache_creation: { ephemeral_5m_input_tokens: 0.5 },
 			},
 			{
 				input_tokens: 1,
@@ -403,7 +407,7 @@ describe('ForecastAccumulator', () => {
 		expect(report.amountsAreLowerBounds).toBe(true);
 	});
 
-	test('accepts matching legacy and TTL-split cache creation totals', () => {
+	test('rejects conflicting flat and TTL-split cache counters', () => {
 		const forecast = new ForecastAccumulator(new Date('2026-08-03T12:00:00.000Z'));
 		const timestamp = new Date(forecast.window.historyFrom.getTime() + 12 * 3_600_000).toISOString();
 		expect(
@@ -412,7 +416,7 @@ describe('ForecastAccumulator', () => {
 					usage: {
 						input_tokens: 0,
 						output_tokens: 0,
-						cache_creation_input_tokens: 1_000_000,
+						cache_creation_input_tokens: 7,
 						cache_creation: {
 							ephemeral_5m_input_tokens: 500_000,
 							ephemeral_1h_input_tokens: 500_000,
@@ -420,11 +424,11 @@ describe('ForecastAccumulator', () => {
 					},
 				}),
 			),
-		).toBe(true);
+		).toBe(false);
 		const report = forecast.finalize();
-		expect(report.basis.shadowCostUsd).toBe(4.875);
-		expect(report.records.status).toBe('no-issues-detected');
-		expect(report.amountsAreLowerBounds).toBe(false);
+		expect(report.basis.shadowCostUsd).toBe(0);
+		expect(report.records.invalidUsageTurns).toBe(1);
+		expect(report.amountsAreLowerBounds).toBe(true);
 	});
 
 	test('treats synthetic turns as known free activity', () => {

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aggregate } from '../src/aggregator.ts';
+import { createParseDiagnostics } from '../src/log-contract.ts';
 import { mergeAsyncIterables, parseAll, streamLogFiles } from '../src/parser.ts';
 import type { SessionTurn } from '../src/types.ts';
 
@@ -33,7 +34,7 @@ describe('parseAll()', () => {
 
 		const agents = report.rows.map((r) => r.subagent).sort();
 		expect(agents).toContain('(main)');
-		expect(agents).toContain('Reality Checker');
+		expect(agents).toContain('synthetic-subagent');
 	});
 
 	test('main-session turns are attributed to (main), not to any subagent', async () => {
@@ -47,12 +48,12 @@ describe('parseAll()', () => {
 		);
 
 		const main = report.rows.find((r) => r.subagent === '(main)');
-		const realityChecker = report.rows.find((r) => r.subagent === 'Reality Checker');
+		const syntheticSubagent = report.rows.find((r) => r.subagent === 'synthetic-subagent');
 
 		expect(main).toBeDefined();
-		expect(realityChecker).toBeDefined();
+		expect(syntheticSubagent).toBeDefined();
 		expect(main!.sessionCount).toBe(1);
-		expect(realityChecker!.sessionCount).toBe(1);
+		expect(syntheticSubagent!.sessionCount).toBe(1);
 	});
 
 	test('respects date range filter', async () => {
@@ -104,18 +105,56 @@ describe('parseAll()', () => {
 			for await (const turn of parseAll({ projectsDir: root })) defaultTurns.push(turn);
 			expect(defaultTurns).toEqual([]);
 
-			const diagnostics = { malformedJsonLines: 0 };
+			const diagnostics = createParseDiagnostics();
 			const diagnosticTurns = [];
 			for await (const turn of parseAll({
 				projectsDir: root,
-				includeInvalidTimestamps: true,
 				diagnostics,
 			})) {
 				diagnosticTurns.push(turn);
 			}
-			expect(diagnosticTurns).toHaveLength(1);
-			expect(diagnosticTurns[0]?.timestamp).toBe('');
+			expect(diagnosticTurns).toEqual([]);
 			expect(diagnostics.malformedJsonLines).toBe(1);
+			expect(diagnostics.invalidTimestampLines).toBe(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('scopes timestamped invalid diagnostics to the requested range', async () => {
+		const root = mkdtempSync(join(tmpdir(), 'agent-ledger-parser-range-'));
+		try {
+			const project = join(root, 'project');
+			mkdirSync(project);
+			const invalidUsage = (timestamp: string) =>
+				JSON.stringify({
+					type: 'assistant',
+					timestamp,
+					message: { model: 'claude-sonnet-4-6', usage: { input_tokens: -1 } },
+				});
+			const unknownRecord = (timestamp: string) =>
+				JSON.stringify({ type: 'future-event', timestamp });
+			writeFileSync(
+				join(project, 'windowed.jsonl'),
+				[
+					invalidUsage('2024-01-01T00:00:00Z'),
+					invalidUsage('2026-08-03T01:00:00Z'),
+					unknownRecord('2024-01-01T00:00:00Z'),
+					unknownRecord('2026-08-03T01:00:00Z'),
+				].join('\n') + '\n',
+			);
+			const diagnostics = createParseDiagnostics();
+			for await (const _turn of parseAll({
+				projectsDir: root,
+				from: new Date('2026-08-03T00:00:00Z'),
+				to: new Date('2026-08-04T00:00:00Z'),
+				diagnostics,
+			})) {
+				// Every synthetic record in this fixture is intentionally invalid.
+			}
+			expect(diagnostics.invalidUsageLines).toBe(1);
+			expect(diagnostics.unsupportedRecordLines).toBe(1);
+			expect(diagnostics.samples.map((sample) => sample.line)).toEqual([2, 4]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -419,12 +458,11 @@ describe('mergeAsyncIterables()', () => {
 			const index = Number(path.match(/\d+/)?.[0]);
 			for (let turn = 0; turn < 100; turn++) {
 				produced[index] = (produced[index] ?? 0) + 1;
-				yield {
-					type: 'assistant',
-					timestamp: '2026-08-03T00:00:00Z',
-					sessionId: `session-${index}`,
-					raw: null,
-				};
+					yield {
+						type: 'assistant',
+						timestamp: '2026-08-03T00:00:00Z',
+						sessionId: `session-${index}`,
+					};
 			}
 		}
 

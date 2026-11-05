@@ -53,7 +53,6 @@ const arbAssistantTurn = (): fc.Arbitrary<SessionTurn> =>
 		.map((r) => ({
 			type: 'assistant' as const,
 			...r,
-			raw: r,
 		}));
 
 describe('costFor() invariants', () => {
@@ -156,7 +155,6 @@ describe('Aggregator invariants', () => {
 					model,
 					sessionId: 'sess',
 					timestamp: '2026-04-23T00:00:00Z',
-					raw: {},
 				};
 				const agg = new Aggregator('subagent', new Date('2025-01-01'), new Date('2027-01-01'));
 				agg.add(userTurn);

@@ -9,7 +9,6 @@ function sonnet5Turn(timestamp: string): SessionTurn {
 		sessionId: 'pricing-boundary-session',
 		model: 'claude-sonnet-5',
 		usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-		raw: {},
 	};
 }
 
@@ -25,6 +24,24 @@ test('historical explain prices each turn at its own timestamp', () => {
 	expect(analysis.totalCost).toBe(30);
 	expect(analysis.models.get('claude-sonnet-5')).toBe(30);
 	expect(analysis.topTurns.map((turn) => turn.cost)).toEqual([18, 12]);
+});
+
+test('explain gives TTL-split cache counters precedence over the legacy flat total', () => {
+	const cases = [
+		{ cache: { cache_creation_input_tokens: 100, cache_creation: { ephemeral_1h_input_tokens: 100 } }, fiveMin: 0, oneHour: 100 },
+		{ cache: { cache_creation_input_tokens: 500, cache_creation: { ephemeral_5m_input_tokens: 100 } }, fiveMin: 100, oneHour: 0 },
+		{ cache: { cache_creation_input_tokens: 100 }, fiveMin: 100, oneHour: 0 },
+	];
+	for (const { cache, fiveMin, oneHour } of cases) {
+		const analysis = analyzeTurns([{
+			type: 'assistant', timestamp: '2026-08-02T12:00:00Z',
+			sessionId: 'synthetic-cache-session', model: 'claude-sonnet-4-6',
+			usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 100, ...cache },
+		}], 'synthetic-cache-session');
+		expect(analysis.topTurns[0]?.cacheCreate5m).toBe(fiveMin);
+		expect(analysis.topTurns[0]?.cacheCreate1h).toBe(oneHour);
+		expect(analysis.cacheReuseRatio).toBe(1);
+	}
 });
 
 const privateAnalysis = {
