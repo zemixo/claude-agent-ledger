@@ -114,7 +114,9 @@ export function analyzeTurns(turns: SessionTurn[], sessionPrefix: string): Sessi
 		for (const t of turn.toolUses ?? []) {
 			tools.set(t, (tools.get(t) ?? 0) + 1);
 		}
-		const fiveMin = turn.usage.cache_creation?.ephemeral_5m_input_tokens ?? turn.usage.cache_creation_input_tokens ?? 0;
+		const fiveMin = turn.usage.cache_creation
+			? turn.usage.cache_creation.ephemeral_5m_input_tokens ?? 0
+			: turn.usage.cache_creation_input_tokens ?? 0;
 		const oneH = turn.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
 		totalCacheRead += turn.usage.cache_read_input_tokens ?? 0;
 		totalCacheWrite += fiveMin + oneH;
