@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `agent-ledger forecast` with a seven-complete-local-day basis and an
+  equally sized constant-rate projection over the next seven complete days.
+- Include seven daily basis rows, activity coverage, captured pricing time,
+  plan context, and separate pricing/record diagnostics in a versioned v1 JSON
+  schema.
+- Mark every reported amount as a lower bound when model pricing or detected
+  record coverage is incomplete, while keeping JSON stdout clean and reporting
+  one gap warning on stderr.
+- Freeze rates at `pricing.asOf`; scheduled price changes in the projection
+  window are deliberately not simulated.
+
+### Changed
+
+- Treat missing, unreadable, or untraversable source paths and nested symbolic
+  links as forecast errors instead of presenting a partial scan as trustworthy
+  zero activity.
+- Preserve missing timestamps as invalid records and expose malformed-line
+  diagnostics to forecast callers instead of inventing a current timestamp or
+  silently authenticating incomplete data; validate timestamps as RFC3339
+  calendar values instead of relying on JavaScript's permissive normalization.
+
 ### Fixed
 
 - Validate log record shapes, timestamps and token counters before aggregation;

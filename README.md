@@ -48,6 +48,8 @@ agent-ledger week --by day         # daily bar chart with peak/avg/variance
 agent-ledger today --budget 50     # CI gate: exit 2 if today > $50
 agent-ledger week --json | jq      # JSON output for any view, including summary
 agent-ledger month --md > report.md
+agent-ledger forecast --plan max   # next 7 complete days at the last 7-day rate
+agent-ledger forecast --json | jq  # versioned v1 schema with basis + coverage diagnostics
 
 # Live tail — polling delta meter
 agent-ledger watch                          # refresh every 10s
@@ -61,8 +63,8 @@ ANTHROPIC_API_KEY=sk-ant-... agent-ledger explain <session-id>
                                             # LLM mode: Haiku 4.5 ≤4-bullet root cause (typically <$0.005/run)
 ```
 
-All aggregate commands run locally, require no account, and make no network
-requests. `explain` is also local by default. If you explicitly set
+All aggregate and forecast commands run locally, require no account, and make
+no network requests. `explain` is also local by default. If you explicitly set
 `ANTHROPIC_API_KEY`, it sends derived session metrics — subagent/model/tool
 names, timestamps, token counts, and cost totals — to the
 Anthropic API. The session identifier is redacted. It does **not** send prompts,
@@ -133,6 +135,39 @@ If you're on a fixed-price subscription (Claude Pro / Max / Claude Code plan), y
 If you're on pay-as-you-go, treat the `cost` column as a directional estimate.
 Batch discounts, long-context premiums, provider-specific rates, retries, and
 future price changes can make an invoice differ.
+
+## Seven-day forecast
+
+`agent-ledger forecast` is deliberately a transparent same-rate projection,
+not a predictive model. It totals the previous seven **complete local calendar
+days**, divides by seven (including zero-use days), and projects that daily rate
+over the next seven complete days starting tomorrow. Today's partial data is
+excluded from both windows.
+
+The report shows the local time zone, all seven daily basis rows in JSON, active
+days, the captured pricing time, and the exact method. `--plan pro|max` keeps
+the shadow-cost amount visible but labels it as an API-list-price equivalent,
+not a fixed-subscription bill forecast.
+
+Every observed usage record is repriced with the one rate snapshot captured at
+`pricing.asOf`. Rates stay frozen for the whole report: scheduled or future
+price changes inside the projection window are not modeled.
+
+Unknown or missing model prices are never guessed. Their turns still count as
+activity. Detected malformed JSON, invalid timestamps, and invalid usage are
+reported separately from pricing coverage. If either kind of gap exists, text
+output uses a `≥` marker, JSON sets the top-level `amountsAreLowerBounds` for
+every basis, daily, average, and projection amount, and stderr reports one
+coverage warning without contaminating JSON stdout.
+
+A readable but empty projects directory produces an explicit `no-activity`
+report. Forecast scanning fails closed on missing, unreadable, or untraversable
+source paths and on nested symbolic links, rather than silently presenting a
+partial tree as trustworthy `$0` activity. Record diagnostics describe issues
+the parser detected; they are not an invoice-completeness certification.
+Malformed-line diagnostics are source-wide because a line without a valid
+timestamp cannot be assigned safely to the seven-day basis. Timestamps must be
+valid RFC3339 values with an explicit UTC marker or numeric offset.
 
 ## How it works
 
@@ -232,9 +267,9 @@ price change does not retroactively reprice earlier usage.
 - [x] Terminal table + Markdown + JSON output
 - [x] ANSI color, TTY-aware
 - [x] Cache 1h/5m TTL split pricing
-- [x] `--plan pro|max` to mask shadow cost
+- [x] `--plan pro|max` to mask grouped views or label forecast equivalents
 - [x] `server_tool_use` accounting (paid web search, no-fee web fetch)
-- [ ] Cost forecasting (trailing 7-day burn rate)
+- [x] Constant-rate seven-day projection with explicit coverage diagnostics
 - [ ] Calibration against real Anthropic invoices
 - [ ] Homebrew tap
 

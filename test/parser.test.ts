@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aggregate } from '../src/aggregator.ts';
 import { mergeAsyncIterables, parseAll, streamLogFiles } from '../src/parser.ts';
@@ -79,6 +81,126 @@ describe('parseAll()', () => {
 
 		expect(discovered.sort()).toEqual(['agent-deadbeef', 'session-abc']);
 	});
+	test('does not invent timestamps and can expose invalid records with diagnostics', async () => {
+		const root = mkdtempSync(join(tmpdir(), 'agent-ledger-parser-'));
+		try {
+			const project = join(root, 'project');
+			mkdirSync(project);
+			writeFileSync(
+				join(project, 'damaged.jsonl'),
+				[
+					JSON.stringify({
+						type: 'assistant',
+						message: {
+							model: 'claude-sonnet-4-6',
+							usage: { input_tokens: 1, output_tokens: 1 },
+						},
+					}),
+					'{malformed-json',
+				].join('\n') + '\n',
+			);
+
+			const defaultTurns = [];
+			for await (const turn of parseAll({ projectsDir: root })) defaultTurns.push(turn);
+			expect(defaultTurns).toEqual([]);
+
+			const diagnostics = { malformedJsonLines: 0 };
+			const diagnosticTurns = [];
+			for await (const turn of parseAll({
+				projectsDir: root,
+				includeInvalidTimestamps: true,
+				diagnostics,
+			})) {
+				diagnosticTurns.push(turn);
+			}
+			expect(diagnosticTurns).toHaveLength(1);
+			expect(diagnosticTurns[0]?.timestamp).toBe('');
+			expect(diagnostics.malformedJsonLines).toBe(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('keeps aggregate validation while forecast explicitly preserves incomplete usage', async () => {
+		const root = mkdtempSync(join(tmpdir(), 'agent-ledger-parser-modes-'));
+		try {
+			const project = join(root, 'project');
+			mkdirSync(project);
+			writeFileSync(join(project, 'modes.jsonl'), [
+				{ input_tokens: -1, output_tokens: 0 },
+				{ input_tokens: 1 },
+			].map((usage) => JSON.stringify({
+				type: 'assistant', timestamp: '2026-08-03T12:00:00Z',
+				message: { model: 'claude-sonnet-4-6', usage },
+			})).join('\n') + '\n');
+
+			const skipped: string[] = [];
+			const discovered: string[] = [];
+			const aggregateTurns = [];
+			for await (const turn of parseAll({
+				projectsDir: root,
+				onSkippedRecord: (reason) => skipped.push(reason),
+				onSessionLog: (id) => discovered.push(id),
+			})) aggregateTurns.push(turn);
+			expect(skipped).toEqual(['invalid_usage']);
+			expect(discovered).toEqual(['modes']);
+			expect(aggregateTurns.map((turn) => turn.usage)).toEqual([
+				{ input_tokens: 1, output_tokens: 0 },
+			]);
+
+			const diagnosticTurns = [];
+			for await (const turn of parseAll({ projectsDir: root, includeInvalidUsage: true })) {
+				diagnosticTurns.push(turn);
+			}
+			const rawUsages: unknown[] = diagnosticTurns.map((turn) => turn.usage);
+			expect(rawUsages).toEqual([
+				{ input_tokens: -1, output_tokens: 0 },
+				{ input_tokens: 1 },
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+
+	test('keeps legacy timestamps for aggregates while forecast requires explicit RFC3339 instants', async () => {
+		const root = mkdtempSync(join(tmpdir(), 'agent-ledger-timestamp-modes-'));
+		try {
+			const project = join(root, 'project');
+			mkdirSync(project);
+			const timestamps = ['2026-08-03', '2026-08-03T12:00:00', '2026-08-03T12:00:00Z'];
+			writeFileSync(join(project, 'timestamps.jsonl'), timestamps.map((timestamp) => JSON.stringify({
+				type: 'assistant', timestamp,
+				message: { model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 0 } },
+			})).join('\n') + '\n');
+			const options = {
+				projectsDir: root,
+				from: new Date('2026-08-02T00:00:00Z'),
+				to: new Date('2026-08-05T00:00:00Z'),
+			};
+			const aggregateTimestamps = [];
+			for await (const turn of parseAll(options)) aggregateTimestamps.push(turn.timestamp);
+			expect(aggregateTimestamps).toEqual(timestamps);
+
+			const strictTimestamps = [];
+			const skipped: string[] = [];
+			for await (const turn of parseAll({
+				...options, strictTimestamps: true,
+				onSkippedRecord: (reason) => skipped.push(reason),
+			})) strictTimestamps.push(turn.timestamp);
+			expect(strictTimestamps).toEqual(['2026-08-03T12:00:00Z']);
+			expect(skipped).toEqual(['invalid_timestamp', 'invalid_timestamp']);
+
+			const diagnosticTimestamps = [];
+			for await (const turn of parseAll({
+				...options, strictTimestamps: true, includeInvalidTimestamps: true,
+			})) diagnosticTimestamps.push(turn.timestamp);
+			expect(diagnosticTimestamps).toEqual(timestamps);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 });
 
 describe('mergeAsyncIterables()', () => {

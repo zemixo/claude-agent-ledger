@@ -1,4 +1,8 @@
 #!/usr/bin/env bun
+import { constants } from 'node:fs';
+import { access, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
 	Aggregator,
 	DuplicateSessionIdError,
@@ -14,7 +18,8 @@ import {
 	llmExplain,
 } from '../src/explain.ts';
 import { formatMarkdown, formatSummary, formatTable, formatTrend } from '../src/format.ts';
-import { parseAll } from '../src/parser.ts';
+import { escapeForecastLabel, ForecastAccumulator, formatForecast } from '../src/forecast.ts';
+import { LogSourceError, parseAll, type ParseDiagnostics } from '../src/parser.ts';
 import { isKnownModel } from '../src/pricing.ts';
 import { formatTree, formatTreeMarkdown } from '../src/tree.ts';
 import type { LedgerReport, SubagentTreeNode } from '../src/types.ts';
@@ -57,6 +62,8 @@ function usage(exitCode = 1): never {
   agent-ledger <today|week|month> [flags]    — aggregate views
   agent-ledger explain <sessionId> [--anonymize]
                                              — root-cause why one session was expensive (new in 0.6)
+  agent-ledger forecast [--json] [--plan pro|max] [--verbose]
+                                             — transparent next-7-day shadow-cost estimate
   agent-ledger watch [seconds]                — refresh today's cost (2..2147483 seconds; default: 10)
 
 Flags:
@@ -73,8 +80,8 @@ Flags:
                               The MOAT view: orchestrator → 3×researcher + 6×swift-dev = $312.
   --budget <USD>              Exit non-zero (code 2) if total cost > USD. Pipe-friendly.
   --md                        Markdown table output (good for sharing / commits)
-  --json                      Raw JSON output (also works with --summary now)
-  --plan pro|max              Mask estimated costs in grouped table views.
+  --json                      Raw JSON output for aggregate, summary, or forecast
+  --plan pro|max              Mask grouped-table costs; forecast keeps shadow cost visible.
   --anonymize                 Replace project paths and session ids with safe placeholders.
   --verbose                   Print parse stats (files, turns, elapsed) to stderr.
 
@@ -83,6 +90,7 @@ Environment:
   FORCE_COLOR=1               Force colors when piping
 
 Examples:
+  agent-ledger forecast --plan max          # transparent 7-day same-rate projection
   agent-ledger week --summary               # the dashboard
   agent-ledger week --tree                  # subagent fan-out tree
   agent-ledger week --by tool               # which Claude tool ate the budget
@@ -98,6 +106,38 @@ function explainUsage(exitCode = 1): never {
   sessionId can be a full UUID or a letter, number, and hyphen prefix.
   Prefixes must match exactly one local session.`);
 	process.exit(exitCode);
+}
+
+interface ForecastArgs {
+	json: boolean;
+	plan: Plan;
+	verbose: boolean;
+}
+
+function parseForecastArgs(argv: string[]): ForecastArgs {
+	let plan: Plan = 'payg';
+	let json = false;
+	let verbose = false;
+	for (let index = 0; index < argv.length; index++) {
+		const flag = argv[index];
+		if (flag === '--json') {
+			json = true;
+		} else if (flag === '--verbose') {
+			verbose = true;
+		} else if (flag === '--plan') {
+			const next = argv[index + 1];
+			if (next !== 'pro' && next !== 'max') {
+				console.error('agent-ledger forecast: --plan requires pro or max');
+				usage();
+			}
+			plan = next;
+			index++;
+		} else {
+			console.error('agent-ledger forecast: unknown flag');
+			usage();
+		}
+	}
+	return { json, plan, verbose };
 }
 
 function parseArgs(argv: string[]): Args {
@@ -384,6 +424,78 @@ async function explainCmd(sessionPrefix: string, anonymize: boolean): Promise<vo
 	}
 }
 
+async function forecastCmd(argv: string[]): Promise<void> {
+	const args = parseForecastArgs(argv);
+	const asOf = new Date();
+	const projectsDir = join(homedir(), '.claude', 'projects');
+	try {
+		const source = await stat(projectsDir);
+		if (!source.isDirectory()) throw new Error('not a directory');
+		await access(projectsDir, constants.R_OK | constants.X_OK);
+	} catch {
+		console.error('agent-ledger forecast: Claude projects directory is not readable');
+		process.exit(1);
+	}
+
+	const accumulator = new ForecastAccumulator(asOf, args.plan);
+	const { historyFrom, historyToExclusive } = accumulator.window;
+	// parseAll() currently uses an inclusive upper bound; subtract one
+	// millisecond to preserve the forecast's [start, end) contract.
+	const parserTo = new Date(historyToExclusive.getTime() - 1);
+	const startedAt = Date.now();
+	let candidateTurns = 0;
+	const diagnostics: ParseDiagnostics = { malformedJsonLines: 0 };
+	try {
+		for await (const turn of parseAll({
+			from: historyFrom,
+			to: parserTo,
+			projectsDir,
+			strictSource: true,
+			includeInvalidTimestamps: true,
+			strictTimestamps: true,
+			includeInvalidUsage: true,
+			diagnostics,
+		})) {
+			candidateTurns++;
+			accumulator.add(turn);
+		}
+	} catch (error) {
+		const detail = error instanceof LogSourceError && error.reason === 'symbolic-link'
+			? ' (symbolic link is not allowed)' : '';
+		console.error(`agent-ledger forecast: failed to read Claude projects source${detail}`);
+		process.exit(1);
+	}
+	const report = accumulator.finalize(diagnostics);
+
+	if (report.amountsAreLowerBounds) {
+		const gaps: string[] = [];
+		gaps.push(...report.pricing.unpricedModels.map(escapeForecastLabel));
+		if (report.pricing.missingModelTurns > 0) {
+			gaps.push(`${report.pricing.missingModelTurns} missing-model turn(s)`);
+		}
+		if (report.records.malformedJsonLines > 0) {
+			gaps.push(`${report.records.malformedJsonLines} malformed JSON line(s)`);
+		}
+		if (report.records.invalidTimestampTurns > 0) {
+			gaps.push(`${report.records.invalidTimestampTurns} invalid-timestamp turn(s)`);
+		}
+		if (report.records.invalidUsageTurns > 0) {
+			gaps.push(`${report.records.invalidUsageTurns} invalid-usage turn(s)`);
+		}
+		console.error(
+			`agent-ledger forecast: incomplete cost coverage (${gaps.join(', ')}); ` +
+				'all reported amounts are lower bounds',
+		);
+	}
+	if (args.verbose) {
+		console.error(
+			`agent-ledger forecast: parsed ${candidateTurns} candidate turns in ${Date.now() - startedAt}ms`,
+		);
+	}
+
+	console.log(args.json ? JSON.stringify(report, null, 2) : formatForecast(report));
+}
+
 async function main(): Promise<void> {
 	const cliArgs = process.argv.slice(2);
 	const command = cliArgs[0];
@@ -413,6 +525,9 @@ async function main(): Promise<void> {
 	if (command === 'watch') {
 		const interval = parseWatchInterval(cliArgs.slice(1));
 		return watchCmd(interval);
+	}
+	if (command === 'forecast') {
+		return forecastCmd(cliArgs.slice(1));
 	}
 	const args = parseArgs(cliArgs);
 	const { from, to } = periodRange(args.period);
