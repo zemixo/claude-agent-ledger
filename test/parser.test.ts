@@ -69,7 +69,20 @@ describe('parseAll()', () => {
 		expect(report.rows.length).toBe(0);
 	});
 
-	test('does not invent timestamps and reports invalid records', async () => {
+	test('reports every session log before filtering turns by date', async () => {
+		const discovered: string[] = [];
+		for await (const _turn of parseAll({
+			from: new Date('2030-01-01T00:00:00Z'),
+			to: new Date('2030-01-02T00:00:00Z'),
+			projectsDir: PROJECTS_DIR,
+			onSessionLog: (sessionId) => discovered.push(sessionId),
+		})) {
+			// The fixture has no turns in 2030; discovery still covers every log.
+		}
+
+		expect(discovered.sort()).toEqual(['agent-deadbeef', 'session-abc']);
+	});
+	test('does not invent timestamps and can expose invalid records with diagnostics', async () => {
 		const root = mkdtempSync(join(tmpdir(), 'agent-ledger-parser-'));
 		try {
 			const project = join(root, 'project');
@@ -117,7 +130,7 @@ describe('parseAll()', () => {
 				JSON.stringify({
 					type: 'assistant',
 					timestamp,
-					message: { model: 'claude-sonnet-4-6', usage: { input_tokens: 1 } },
+					message: { model: 'claude-sonnet-4-6', usage: { input_tokens: -1 } },
 				});
 			const unknownRecord = (timestamp: string) =>
 				JSON.stringify({ type: 'future-event', timestamp });
@@ -146,6 +159,87 @@ describe('parseAll()', () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	test('keeps aggregate validation while forecast explicitly preserves incomplete usage', async () => {
+		const root = mkdtempSync(join(tmpdir(), 'agent-ledger-parser-modes-'));
+		try {
+			const project = join(root, 'project');
+			mkdirSync(project);
+			writeFileSync(join(project, 'modes.jsonl'), [
+				{ input_tokens: -1, output_tokens: 0 },
+				{ input_tokens: 1 },
+			].map((usage) => JSON.stringify({
+				type: 'assistant', timestamp: '2026-08-03T12:00:00Z',
+				message: { model: 'claude-sonnet-4-6', usage },
+			})).join('\n') + '\n');
+
+			const skipped: string[] = [];
+			const discovered: string[] = [];
+			const aggregateTurns = [];
+			for await (const turn of parseAll({
+				projectsDir: root,
+				onSkippedRecord: (reason) => skipped.push(reason),
+				onSessionLog: (id) => discovered.push(id),
+			})) aggregateTurns.push(turn);
+			expect(skipped).toEqual(['invalid_usage']);
+			expect(discovered).toEqual(['modes']);
+			expect(aggregateTurns.map((turn) => turn.usage)).toEqual([
+				{ input_tokens: 1, output_tokens: 0 },
+			]);
+
+			const diagnosticTurns = [];
+			for await (const turn of parseAll({ projectsDir: root, includeInvalidUsage: true })) {
+				diagnosticTurns.push(turn);
+			}
+			const rawUsages: unknown[] = diagnosticTurns.map((turn) => turn.usage);
+			expect(rawUsages).toEqual([
+				{ input_tokens: -1, output_tokens: 0 },
+				{ input_tokens: 1 },
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+
+	test('keeps legacy timestamps for aggregates while forecast requires explicit RFC3339 instants', async () => {
+		const root = mkdtempSync(join(tmpdir(), 'agent-ledger-timestamp-modes-'));
+		try {
+			const project = join(root, 'project');
+			mkdirSync(project);
+			const timestamps = ['2026-08-03', '2026-08-03T12:00:00', '2026-08-03T12:00:00Z'];
+			writeFileSync(join(project, 'timestamps.jsonl'), timestamps.map((timestamp) => JSON.stringify({
+				type: 'assistant', timestamp,
+				message: { model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 0 } },
+			})).join('\n') + '\n');
+			const options = {
+				projectsDir: root,
+				from: new Date('2026-08-02T00:00:00Z'),
+				to: new Date('2026-08-05T00:00:00Z'),
+			};
+			const aggregateTimestamps = [];
+			for await (const turn of parseAll(options)) aggregateTimestamps.push(turn.timestamp);
+			expect(aggregateTimestamps).toEqual(timestamps);
+
+			const strictTimestamps = [];
+			const skipped: string[] = [];
+			for await (const turn of parseAll({
+				...options, strictTimestamps: true,
+				onSkippedRecord: (reason) => skipped.push(reason),
+			})) strictTimestamps.push(turn.timestamp);
+			expect(strictTimestamps).toEqual(['2026-08-03T12:00:00Z']);
+			expect(skipped).toEqual(['invalid_timestamp', 'invalid_timestamp']);
+
+			const diagnosticTimestamps = [];
+			for await (const turn of parseAll({
+				...options, strictTimestamps: true, includeInvalidTimestamps: true,
+			})) diagnosticTimestamps.push(turn.timestamp);
+			expect(diagnosticTimestamps).toEqual(timestamps);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 });
 
 describe('mergeAsyncIterables()', () => {

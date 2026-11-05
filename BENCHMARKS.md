@@ -14,7 +14,7 @@ record-count measurement.
 
 | Profile | Small | Medium | Large | Use |
 |---|---:|---:|---:|---|
-| `smoke` | 1,000 | 10,000 | 100,000 records | Ordinary main-targeting CI check |
+| `smoke` | 1,000 | 10,000 | 100,000 records | Ordinary PR and main CI check |
 | `full` | 10,000 | 100,000 | 1,000,000 records | Parser-relevant PR, manual, and weekly receipt |
 
 Every ten input records contain eight current assistant-usage records, one
@@ -81,7 +81,8 @@ unexpected accepted/ignored count, or any diagnostic line. Each child has a
 Two deliberately broad scale guards catch regressions rather than ordinary
 host noise:
 
-- The 1,000,000 / 100,000 median parse-time ratio must be no more than 15×.
+- The large / medium median parse-time ratio must be no more than 15×
+  (1,000,000 / 100,000 records for full; 100,000 / 10,000 for smoke).
   This check is skipped when the medium median is below 100 ms, where fixed
   process and filesystem overhead dominates.
 - `max(medium peak RSS, large peak RSS) - small peak RSS` must be no more than

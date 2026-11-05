@@ -26,7 +26,7 @@ export function formatTree(roots: SubagentTreeNode[], totalCost: number): string
 		bold('Subagent graphs') +
 			dim('  · top ') +
 			roots.length +
-			dim(' orchestrators by total cost · grand-total ') +
+			dim(' roots by total cost · grand-total ') +
 			amber(fmtUsd(totalCost)),
 	);
 	lines.push('');
@@ -82,7 +82,7 @@ function countDescendants(node: SubagentTreeNode): number {
 // Markdown variant — same data, GH-friendly nested list.
 export function formatTreeMarkdown(roots: SubagentTreeNode[], totalCost: number): string {
 	const lines: string[] = ['# Subagent graphs', ''];
-	lines.push(`Top ${roots.length} orchestrators by total cost. Grand total: **${fmtUsd(totalCost)}**.`);
+	lines.push(`Top ${roots.length} roots by total cost. Grand total: **${fmtUsd(totalCost)}**.`);
 	lines.push('');
 	for (const root of roots) {
 		const childCount = countDescendants(root);

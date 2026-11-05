@@ -131,6 +131,17 @@ export function costFor(
 	};
 }
 
+export function costForTimestamp(
+	usage: TokenUsage,
+	model: ModelId | undefined,
+	timestamp: string,
+	fallbackAsOf: Date = new Date(),
+): CostBreakdown {
+	const parsedTimestamp = new Date(timestamp);
+	const asOf = Number.isNaN(parsedTimestamp.getTime()) ? fallbackAsOf : parsedTimestamp;
+	return costFor(usage, model, asOf);
+}
+
 export function isKnownModel(model: ModelId | undefined): boolean {
 	if (!model) return false;
 	if (FREE_MODELS.has(model)) return true;

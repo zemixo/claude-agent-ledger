@@ -50,6 +50,8 @@ export interface ParseDiagnostics {
 	invalidUsageLines: number;
 	invalidSubagentMetaFiles: number;
 	ignoredSourceRecordLines: number;
+	forwardedInvalidTimestampLines: number;
+	forwardedInvalidUsageLines: number;
 	samples: ParseDiagnostic[];
 }
 
@@ -64,6 +66,8 @@ export function createParseDiagnostics(): ParseDiagnostics {
 		invalidUsageLines: 0,
 		invalidSubagentMetaFiles: 0,
 		ignoredSourceRecordLines: 0,
+		forwardedInvalidTimestampLines: 0,
+		forwardedInvalidUsageLines: 0,
 		samples: [],
 	};
 }
@@ -147,7 +151,7 @@ function messageHasOwnUsage(record: Record<string, unknown>): boolean {
 	return Boolean(message && hasOwnUsage(message));
 }
 
-export function isSupportedUsage(value: unknown): value is TokenUsage {
+export function isSupportedUsage(value: unknown, requireCacheAgreement = false): value is TokenUsage {
 	const usage = recordObject(value);
 	if (!usage) return false;
 	if (!hasOnlyKeys(usage, usageKeys)) return false;
@@ -181,6 +185,8 @@ export function isSupportedUsage(value: unknown): value is TokenUsage {
 				? cache.ephemeral_1h_input_tokens
 				: 0;
 		if (!Number.isSafeInteger(fiveMinute + oneHour)) return false;
+		if (requireCacheAgreement && usage.cache_creation_input_tokens !== undefined &&
+			usage.cache_creation_input_tokens !== fiveMinute + oneHour) return false;
 	}
 
 	if (usage.server_tool_use !== undefined) {
@@ -197,8 +203,24 @@ export function isSupportedUsage(value: unknown): value is TokenUsage {
 	return true;
 }
 
-export function classifyLogRecord(record: Record<string, unknown>): LogRecordClassification {
-	if (contextTypes.has(record.type as string)) {
+// Validation observes the whole shape; consumers retain only numeric cost counters.
+export function projectUsage(usage: TokenUsage): TokenUsage {
+	return {
+		input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
+		...(usage.cache_creation_input_tokens !== undefined ? { cache_creation_input_tokens: usage.cache_creation_input_tokens } : {}),
+		...(usage.cache_read_input_tokens !== undefined ? { cache_read_input_tokens: usage.cache_read_input_tokens } : {}),
+		...(usage.cache_creation ? { cache_creation: { ...usage.cache_creation } } : {}),
+		...(usage.server_tool_use ? { server_tool_use: { ...usage.server_tool_use } } : {}),
+	};
+}
+
+export function classifyLogRecord(
+	record: Record<string, unknown>,
+	options: { strictTimestamps?: boolean; allowPartialUsage?: boolean; requireCacheAgreement?: boolean } = {},
+): LogRecordClassification {
+	const envelopeMessage = recordObject(record.message);
+	const recordType = record.type ?? envelopeMessage?.role;
+	if (contextTypes.has(recordType as string)) {
 		if (hasOwnUsage(record) || messageHasOwnUsage(record)) {
 			return {
 				status: 'invalid',
@@ -209,7 +231,7 @@ export function classifyLogRecord(record: Record<string, unknown>): LogRecordCla
 		}
 		return { status: 'ignored', shapeId: LOG_SHAPE_IDS.contextEvent };
 	}
-	if (auxiliaryTypes.has(record.type as string)) {
+	if (auxiliaryTypes.has(recordType as string)) {
 		if (hasOwnUsage(record) || messageHasOwnUsage(record)) {
 			return {
 				status: 'invalid',
@@ -220,7 +242,7 @@ export function classifyLogRecord(record: Record<string, unknown>): LogRecordCla
 		}
 		return { status: 'ignored', shapeId: LOG_SHAPE_IDS.auxiliaryEvent };
 	}
-	if (record.type !== 'assistant') {
+	if (recordType !== 'assistant') {
 		return {
 			status: 'invalid',
 				code: 'unsupported-record-type',
@@ -236,12 +258,14 @@ export function classifyLogRecord(record: Record<string, unknown>): LogRecordCla
 			reason: 'assistant usage must appear only at message.usage',
 		};
 	}
-	if (!parseRfc3339Timestamp(record.timestamp)) {
+	if (options.strictTimestamps === false
+		? typeof record.timestamp !== 'string' || !Number.isFinite(Date.parse(record.timestamp))
+		: !parseRfc3339Timestamp(record.timestamp)) {
 		return {
 			status: 'invalid',
 			code: 'invalid-assistant-timestamp',
 			expectedShape: LOG_SHAPE_IDS.assistantUsage,
-			reason: 'assistant timestamp must be RFC 3339',
+			reason: options.strictTimestamps === false ? 'assistant timestamp must be a valid date' : 'assistant timestamp must be RFC 3339',
 		};
 	}
 	const message = recordObject(record.message);
@@ -261,7 +285,11 @@ export function classifyLogRecord(record: Record<string, unknown>): LogRecordCla
 			reason: 'assistant model must be a non-empty string',
 		};
 	}
-	if (!isSupportedUsage(message.usage)) {
+	const rawUsage = recordObject(message.usage);
+	const usage = options.allowPartialUsage && rawUsage
+		? { ...rawUsage, input_tokens: rawUsage.input_tokens === undefined ? 0 : rawUsage.input_tokens, output_tokens: rawUsage.output_tokens === undefined ? 0 : rawUsage.output_tokens }
+		: message.usage;
+	if (!isSupportedUsage(usage, options.requireCacheAgreement ?? false)) {
 		return {
 			status: 'invalid',
 			code: 'invalid-assistant-usage',
@@ -273,7 +301,7 @@ export function classifyLogRecord(record: Record<string, unknown>): LogRecordCla
 		status: 'accepted',
 		shapeId: LOG_SHAPE_IDS.assistantUsage,
 		message,
-		usage: message.usage,
+		usage: projectUsage(usage),
 		model: message.model as string | undefined,
 	};
 }

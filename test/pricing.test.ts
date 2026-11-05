@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { costFor, isKnownModel } from '../src/pricing.ts';
+import { costFor, costForTimestamp, isKnownModel } from '../src/pricing.ts';
 
 describe('costFor()', () => {
 	test('Opus 4.7 output is $25/M', () => {
@@ -105,6 +105,17 @@ describe('costFor()', () => {
 		);
 		expect(cost.inputCost).toBeCloseTo(3, 6);
 		expect(cost.outputCost).toBeCloseTo(15, 6);
+	});
+
+	test('timestamp pricing preserves current-rate fallback for malformed legacy timestamps', () => {
+		const cost = costForTimestamp(
+			{ input_tokens: 1_000_000, output_tokens: 1_000_000 },
+			'claude-sonnet-5',
+			'not-a-timestamp',
+			new Date('2026-08-31T23:59:59Z'),
+		);
+		expect(cost.inputCost).toBeCloseTo(2, 6);
+		expect(cost.outputCost).toBeCloseTo(10, 6);
 	});
 
 	test('Haiku 4.5 uses $1/M input and $5/M output', () => {

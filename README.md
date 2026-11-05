@@ -1,5 +1,7 @@
 # claude-agent-ledger
 
+<img src="https://raw.githubusercontent.com/zemixo/claude-agent-ledger/main/quiet-orbit-banner.svg" alt="Agent Ledger: Follow the token trail. Zemixo pixel robot workshop." width="100%">
+
 > See exactly where your Claude Code budget goes — per subagent, per model, per day.
 
 [![npm](https://img.shields.io/npm/v/claude-agent-ledger.svg)](https://www.npmjs.com/package/claude-agent-ledger)
@@ -8,6 +10,8 @@
 > Use `--anonymize` before sharing output. It replaces project paths and
 > session IDs, but it does not rename subagent or tool names — review those
 > before you post a screenshot.
+
+[Install](#install) · [Example](#example) · [Flags](#flags) · [Source install](#install-from-source)
 
 ---
 
@@ -53,6 +57,8 @@ agent-ledger watch 4                        # refresh every 4s
 
 # Root-cause analysis on a single expensive session
 agent-ledger explain <session-id>           # heuristic: top-3 turns + tool/model breakdown
+agent-ledger explain <session-id> --anonymize
+                                            # replace the displayed session id with sess-A
 ANTHROPIC_API_KEY=sk-ant-... agent-ledger explain <session-id>
                                             # LLM mode: Haiku 4.5 ≤4-bullet root cause (typically <$0.005/run)
 ```
@@ -62,7 +68,21 @@ no network requests. `explain` is also local by default. If you explicitly set
 `ANTHROPIC_API_KEY`, it sends derived session metrics — subagent/model/tool
 names, timestamps, token counts, and cost totals — to the
 Anthropic API. The session identifier is redacted. It does **not** send prompts,
-responses, tool content, or project paths.
+responses, tool content, or project paths. For shareable local heuristic output,
+pass `--anonymize`; it replaces the displayed session identifier, but subagent,
+model, tool, timestamp, token, and cost evidence remains visible for review.
+The flag sanitizes command output only: the supplied identifier can still be
+visible in shell history and process arguments.
+Session prefixes must match exactly one local log. If a prefix is ambiguous,
+use the collision-safe prefix shown by `--by session` or the full session ID;
+the CLI does not list matching IDs or paths. Session reports group by full ID,
+then display the shortest directly resolvable label of at least eight characters
+(or the full ID when shorter) against every discovered local log, including
+logs outside the requested date range. Exact full IDs take precedence over
+longer IDs that begin with the same text. If a reported full ID exists at
+multiple paths, or no directly resolvable label has the CLI-safe alphanumeric-
+and-hyphen form, `--by session` fails closed with a generic error. `explain`
+likewise fails closed when the requested full ID exists at multiple paths.
 
 ## Why this and not `/cost`?
 
@@ -138,8 +158,8 @@ activity. Detected malformed JSON, unsupported records, invalid timestamps, and
 invalid usage are reported separately from pricing coverage. If either kind of
 gap exists, text output uses a `≥` marker, JSON sets the top-level
 `amountsAreLowerBounds` for every basis, daily, average, and projection amount,
-and stderr reports one
-coverage warning without contaminating JSON stdout.
+and stderr reports
+coverage warnings without contaminating JSON stdout.
 
 A readable but empty projects directory produces an explicit `no-activity`
 report. Forecast scanning fails closed on missing, unreadable, or untraversable
@@ -167,6 +187,11 @@ metadata, and aggregates by your chosen key. Pricing is applied locally from
 `src/pricing.ts`. Aggregate commands never touch the network after install; the
 optional API-backed `explain` mode is disclosed in [Install](#install).
 
+The tree view displays up to 20 highest-cost roots. Its grand total and
+`--budget` check still include every selected turn, including roots outside the
+display cap. When a parent is outside the selected period, its in-range child is
+shown as a root instead of being dropped.
+
 ### Log compatibility contract
 
 The parser owns an explicit `v1` compatibility contract rather than treating
@@ -185,7 +210,13 @@ allowlists for cost-bearing fields and the nested cache/server-tool namespaces;
 new fields therefore fail visibly instead of being silently omitted from cost.
 Known non-billable records remain tolerant of harmless metadata, but a direct
 `usage` or `message.usage` field is rejected as contract drift. Assistant usage
-is accepted only at `message.usage`.
+is accepted only at `message.usage`; legacy envelopes may identify assistant
+records with `message.role` when top-level `type` is absent. Aggregate and
+explain commands retain valid legacy date strings and omitted input/output
+counters (normalized to zero). Explicit null or invalid counters are rejected.
+Forecast requires explicit RFC3339 instants and complete counters; invalid
+assistant records still count as observed activity when their timestamp is
+valid, while their cost is excluded.
 Each diagnostic contains only a reason code, expected shape, source filename,
 and line number; it never echoes the source record. `--anonymize` also replaces
 the source filename. At most five samples are retained, so repeated damage
@@ -195,10 +226,13 @@ when they change; `explain` exits with an error if validation leaves an existing
 session with no supported billable turns.
 
 Only fields required for cost and attribution enter `SessionTurn`; prompt,
-response, thinking, tool input/result, and attachment bodies are not retained.
+response, thinking, tool input/result, attachment bodies, and arbitrary usage
+metadata such as iterations are not retained. Validated server-tool request
+counters remain available for cost calculation.
 When both flat and TTL-split cache-creation counters are present, both are
 validated and the TTL-split counters determine the cost breakdown; the flat
-counter remains the fallback for older records.
+counter remains the fallback for older records. Forecast additionally rejects
+conflicting flat and TTL-split totals and marks its amounts as lower bounds.
 If a new Claude Code shape appears, open an issue with a from-scratch synthetic
 fixture or a carefully redacted minimal reproduction—never upload a raw log.
 
@@ -271,7 +305,9 @@ published standard rate on 2026-09-01. Pricing can change, so shadow costs are
 estimates rather than invoice replicas; check
 [`src/pricing.ts`](src/pricing.ts) and the
 [official pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
-before making billing decisions.
+before making billing decisions. Historical aggregate, tree, and explain views
+select date-dependent rates from each turn's logged timestamp, so a scheduled
+price change does not retroactively reprice earlier usage.
 
 - [x] Versioned log contract with bounded, privacy-safe diagnostics
 - [x] Log parser (bounded JSONL streaming, recursive subagent discovery)
@@ -295,11 +331,19 @@ session-ID sets; it does not retain every parsed turn. See
 [`BENCHMARKS.md`](BENCHMARKS.md) for the fixed-file synthetic workload,
 sanitized receipt schema, regression thresholds, and explicit limits on what
 the measurements establish.
+Records with malformed JSON, invalid timestamps, or invalid token counters are
+skipped. Aggregate commands report the skipped count on stderr so incomplete
+cost evidence stays visible while JSON output remains machine-readable.
+Missing timestamps are never replaced with the current time.
 
 ## Install from source
 
+Fixes listed under **Unreleased** in [the changelog](CHANGELOG.md) are available
+from `main`. The npm package follows tagged releases; use the source install
+below to try changes that have not been published yet.
+
 ```bash
-git clone https://github.com/XJM-free/claude-agent-ledger.git
+git clone https://github.com/zemixo/claude-agent-ledger.git
 cd claude-agent-ledger
 bun install
 bun link
@@ -317,8 +361,7 @@ bun run benchmark:check
 
 ## Author
 
-Built by [Jie Xiang](https://jiexiang.dev)
-([@XJM-free](https://github.com/XJM-free)).
+Built by [Zemixo](https://github.com/zemixo).
 
 ## License
 
