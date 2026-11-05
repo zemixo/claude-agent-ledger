@@ -9,6 +9,7 @@
   "files": [
     "bin",
     "src",
+    "BENCHMARKS.md",
     "LICENSE",
     "README.md"
   ],
@@ -16,7 +17,9 @@
     "dev": "bun run bin/agent-ledger.ts",
     "test": "bun test",
     "build": "bun build bin/agent-ledger.ts --target=bun --outdir dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "benchmark": "bun run bench/parser.ts",
+    "benchmark:check": "bun run bench/parser.ts --profile smoke --check"
   },
   "engines": {
     "bun": ">=1.1.0"

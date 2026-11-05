@@ -16,5 +16,5 @@
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src/**/*", "bin/**/*", "test/**/*"]
+  "include": ["src/**/*", "bin/**/*", "bench/**/*", "test/**/*"]
 }

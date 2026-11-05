@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a deterministic, private-data-free parser benchmark with fixed 16-file
+  discovery, three record-count sizes, fresh-process wall/RSS samples, strict
+  count and diagnostic validation, and sanitized machine-readable receipts.
+- Add a smoke regression check plus a parser-relevant PR/manual/weekly full
+  benchmark contract; stored cross-runner throughput comparisons remain
+  advisory.
 - Add `agent-ledger forecast` with a seven-complete-local-day basis and an
   equally sized constant-rate projection over the next seven complete days.
 - Include seven daily basis rows, activity coverage, captured pricing time,
@@ -37,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inventing a current timestamp or silently accepting incomplete data; validate
   forecast timestamps as RFC3339 calendar values while retaining supported
   legacy date strings in aggregate and explain commands.
+- Replace unmeasured 10 GB, constant-memory, and fixed speedup language with a
+  bounded benchmark whose documentation states the tested workload and limits.
 - Retain only billing and attribution fields in parsed turns. Forecast keeps
   invalid assistant activity evidence without including its costs. Known context
   and auxiliary records are ignored; prompt, response, tool, attachment, and
@@ -166,12 +174,14 @@ agent-ledger explain b988bd89-803a-4c78    # full uuid or 8-char prefix both wor
 
 ### Added — performance + production-readiness foundation
 
-- **Streaming JSONL parser** — replaces `await file.text()` (which OOM'd on
-  10GB+ logs). Now reads via `Bun.file().stream()` + `TextDecoder` line-by-line.
-  Memory profile is constant regardless of log size.
+- **Streaming JSONL parser** — replaces full-file `await file.text()` reads
+  with `Bun.file().stream()` + `TextDecoder` line-by-line. Parser buffering is
+  bounded by active files and incomplete lines; total process memory also
+  includes discovery and downstream retained keys.
 - **Concurrent file walk** — `findSessionLogs` parallelizes per-project
   `readdir` (`Promise.all`), and `parseAll` reads up to 8 JSONL files
-  concurrently. ~5–10× cold-start speedup on multi-project setups.
+  concurrently. Exact throughput is workload- and environment-dependent; see
+  `BENCHMARKS.md` for the reproducible measurement contract.
 - **Zero materialization** — bin no longer collects every turn into an array
   before aggregating. Instead one parser stream fans out to N `Aggregator`
   instances in parallel. Memory is now O(unique-keys) not O(turns).
