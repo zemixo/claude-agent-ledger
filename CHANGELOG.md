@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-05
+
 ### Added
 
 - Add a deterministic, private-data-free parser benchmark with fixed 16-file
@@ -57,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source-wide.
 
 ### Fixed
+
+- Give TTL-split cache counters precedence over the legacy flat cache total in
+  `explain`, preventing duplicate cache writes and incorrect reuse ratios.
 
 - Validate log record shapes, timestamps and token counters before aggregation;
   report skipped records without printing their contents. Directory discovery

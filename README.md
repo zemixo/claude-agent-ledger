@@ -338,9 +338,9 @@ Missing timestamps are never replaced with the current time.
 
 ## Install from source
 
-Fixes listed under **Unreleased** in [the changelog](CHANGELOG.md) are available
-from `main`. The npm package follows tagged releases; use the source install
-below to try changes that have not been published yet.
+The npm package follows tagged releases listed in [the changelog](CHANGELOG.md).
+Use the source install below to follow `main`, including any changes listed
+under **Unreleased**.
 
 ```bash
 git clone https://github.com/zemixo/claude-agent-ledger.git

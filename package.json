@@ -1,6 +1,6 @@
 {
   "name": "claude-agent-ledger",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "See exactly where your Claude Code budget goes — per subagent, per task.",
   "type": "module",
   "bin": {
